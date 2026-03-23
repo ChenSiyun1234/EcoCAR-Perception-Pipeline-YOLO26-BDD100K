@@ -1,0 +1,11 @@
+# EcoCAR Perception Pipeline — Dependencies
+# Install in Colab: !pip install -r requirements.txt
+
+ultralytics>=8.4.0
+opencv-python>=4.8.0
+matplotlib>=3.7.0
+Pillow>=10.0.0
+PyYAML>=6.0
+tqdm>=4.65.0
+numpy>=1.24.0
+scipy>=1.10.0
