@@ -76,6 +76,7 @@ def convert_bdd100k_to_yolo(
 
     for frame in tqdm(data, desc="Converting annotations"):
         img_name = frame["name"]
+        # Handle name field that may lack .jpg extension
         label_name = Path(img_name).stem + ".txt"
         label_path = os.path.join(output_label_dir, label_name)
 
@@ -217,7 +218,8 @@ def link_or_copy_images(
         Number of images linked/copied.
     """
     os.makedirs(dst_dir, exist_ok=True)
-    files = sorted(os.listdir(src_dir))
+    # Only link image files (skip JSONs that may be mixed in the folder)
+    files = sorted([f for f in os.listdir(src_dir) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
     if debug_limit:
         files = files[:debug_limit]
 
