@@ -143,20 +143,26 @@ def render_lane_mask(
         if category not in LANE_CAT_TO_ID:
             continue
 
-        poly2d_list = label.get("poly2d", [])
-        if poly2d_list is None:
+        poly2d_data = label.get("poly2d")
+        if not poly2d_data or not isinstance(poly2d_data, list):
             continue
 
-        for poly in poly2d_list:
-            if isinstance(poly, dict):
-                vertices = poly.get("vertices", [])
-                types = poly.get("types", "L" * len(vertices))
-            elif isinstance(poly, list):
-                # Sometimes poly2d is directly a list of vertices
-                vertices = poly
-                types = "L" * len(vertices)
-            else:
-                continue
+        polygons = []
+        if len(poly2d_data) > 0:
+            if isinstance(poly2d_data[0], dict):
+                # Standard Scalabel: list of dicts
+                polygons = poly2d_data
+            elif isinstance(poly2d_data[0], list):
+                if len(poly2d_data[0]) >= 2 and isinstance(poly2d_data[0][0], (int, float)):
+                    # List of points (a single polygon)
+                    polygons = [{"vertices": poly2d_data}]
+                elif len(poly2d_data[0]) > 0 and isinstance(poly2d_data[0][0], list):
+                    # List of lists of points (multiple polygons)
+                    polygons = [{"vertices": p} for p in poly2d_data if isinstance(p, list)]
+
+        for poly in polygons:
+            vertices = poly.get("vertices", [])
+            types = poly.get("types", "L" * len(vertices))
 
             if len(vertices) < 2:
                 continue
