@@ -148,8 +148,15 @@ def render_lane_mask(
             continue
 
         for poly in poly2d_list:
-            vertices = poly.get("vertices", [])
-            types = poly.get("types", "L" * len(vertices))
+            if isinstance(poly, dict):
+                vertices = poly.get("vertices", [])
+                types = poly.get("types", "L" * len(vertices))
+            elif isinstance(poly, list):
+                # Sometimes poly2d is directly a list of vertices
+                vertices = poly
+                types = "L" * len(vertices)
+            else:
+                continue
 
             if len(vertices) < 2:
                 continue
