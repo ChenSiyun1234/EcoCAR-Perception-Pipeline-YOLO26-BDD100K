@@ -2,13 +2,64 @@
 Evaluation metrics for both tasks.
 
 Detection: mAP@50, mAP@50-95 using torchmetrics
-Lane: F1-score based on point distance matching, plus Chamfer distance
+Lane: F1-score based on curve-to-curve geometric matching
 """
 
 import math
 import torch
 import numpy as np
 from typing import Dict, List
+
+
+def _segments_from_points(points: torch.Tensor):
+    if points.shape[0] < 2:
+        return points[:1], points[:1]
+    return points[:-1], points[1:]
+
+
+def point_to_polyline_distance(points: torch.Tensor, polyline: torch.Tensor) -> torch.Tensor:
+    if polyline.shape[0] == 0:
+        return torch.zeros(points.shape[0], device=points.device, dtype=points.dtype)
+    if polyline.shape[0] == 1:
+        return torch.norm(points - polyline[0], dim=-1)
+    a, b = _segments_from_points(polyline)
+    ab = b - a
+    ap = points[:, None, :] - a[None, :, :]
+    denom = (ab * ab).sum(dim=-1).clamp(min=1e-8)
+    t = (ap * ab[None, :, :]).sum(dim=-1) / denom[None, :]
+    t = t.clamp(0.0, 1.0)
+    proj = a[None, :, :] + t[..., None] * ab[None, :, :]
+    dist = torch.norm(points[:, None, :] - proj, dim=-1)
+    return dist.min(dim=1).values
+
+
+def resample_polyline(points: torch.Tensor, num: int) -> torch.Tensor:
+    if points.shape[0] == 0:
+        return torch.zeros(num, 2, device=points.device, dtype=points.dtype)
+    if points.shape[0] == 1:
+        return points.repeat(num, 1)
+    seg = torch.norm(points[1:] - points[:-1], dim=-1)
+    cum = torch.cat([torch.zeros(1, device=points.device, dtype=points.dtype), seg.cumsum(0)])
+    total = cum[-1]
+    if total < 1e-8:
+        return points[:1].repeat(num, 1)
+    t = torch.linspace(0.0, float(total.item()), num, device=points.device, dtype=points.dtype)
+    idx = torch.searchsorted(cum, t, right=True) - 1
+    idx = idx.clamp(min=0, max=points.shape[0] - 2)
+    left = points[idx]
+    right = points[idx + 1]
+    left_t = cum[idx]
+    right_t = cum[idx + 1]
+    alpha = ((t - left_t) / (right_t - left_t).clamp(min=1e-8)).unsqueeze(-1)
+    return left + alpha * (right - left)
+
+
+def curve_distance(pred_points: torch.Tensor, gt_points: torch.Tensor, resample_n: int = 96) -> torch.Tensor:
+    pred_rs = resample_polyline(pred_points, resample_n)
+    gt_rs = resample_polyline(gt_points, resample_n)
+    d1 = point_to_polyline_distance(pred_rs, gt_rs).mean()
+    d2 = point_to_polyline_distance(gt_rs, pred_rs).mean()
+    return 0.5 * (d1 + d2)
 
 
 class DetectionMetrics:
@@ -60,13 +111,10 @@ class DetectionMetrics:
 
 
 class LaneMetrics:
-    """Lane evaluation based on point-distance matching.
+    """Lane evaluation based on curve-to-curve geometric matching.
 
-    A predicted lane is "matched" to a GT lane if the average point
-    distance is below a threshold.  From matched pairs we compute
-    precision, recall, and F1.
-
-    Also computes Chamfer distance as a continuous metric.
+    A predicted lane is matched to a GT lane if the symmetric point-to-polyline
+    distance between the two piecewise-linear curves is below a threshold.
     """
 
     def __init__(self, match_thresh_px: float = 15.0, img_size: int = 640):
@@ -111,11 +159,11 @@ class LaneMetrics:
         pred_pts = pred_points[pred_mask]  # (n_pred, N, 2)
         gt_pts = gt_points[gt_mask]        # (n_gt, N, 2)
 
-        # Distance matrix: average point distance
+                # Distance matrix: curve-to-curve geometric distance
         dist = torch.zeros(n_pred, n_gt)
         for i in range(n_pred):
             for j in range(n_gt):
-                dist[i, j] = (pred_pts[i] - gt_pts[j]).norm(dim=-1).mean()
+                dist[i, j] = curve_distance(pred_pts[i], gt_pts[j])
 
         # Greedy matching (simple, fast)
         matched_pred = set()
@@ -145,5 +193,5 @@ class LaneMetrics:
             "lane_f1": f1,
             "lane_precision": prec,
             "lane_recall": rec,
-            "lane_chamfer": chamfer,
+            "lane_curve_dist": chamfer,
         }
