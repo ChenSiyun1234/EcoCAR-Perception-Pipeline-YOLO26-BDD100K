@@ -1,0 +1,82 @@
+run_name: "vehicle_lane_v4"
+seed: 42
+device: "cuda"
+amp: true
+
+data:
+  dataset_root: "/content/bdd100k_yolo"
+  img_size: 640
+  mask_height: 160
+  mask_width: 160
+  batch_size: 16
+  num_workers: 4
+  debug_limit: null
+  augmentation:
+    horizontal_flip: 0.5
+    color_jitter:
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.15
+      hue: 0.01
+    scale_range: [0.8, 1.2]
+    blur_prob: 0.05
+    blur_kernel: 3
+    noise_prob: 0.02
+    noise_std: 6.0
+  lane_targets:
+    mode: "binary"
+
+model:
+  backbone_weights: "yolo26s.pt"
+  lane_head:
+    type: "transformer"
+    embed_dim: 128
+    num_heads: 4
+    depth: 2
+    hidden_channels: 64
+
+loss:
+  lane:
+    type: "bce_dice"
+    bce_weight: 1.0
+    dice_weight: 1.0
+    pos_weight: 8.0
+    label_smoothing: 0.0
+  multitask:
+    strategy: "fixed"
+    det_weight: 1.0
+    lane_weight: 0.3
+
+training:
+  epochs: 30
+  optimizer:
+    type: "sgd"
+    lr: 0.002
+    weight_decay: 5.0e-4
+    momentum: 0.937
+    backbone_lr_scale: 0.1
+  scheduler:
+    type: "cosine_warmup"
+    warmup_epochs: 3
+    min_lr_ratio: 0.01
+  gradient_clip: 10.0
+  ema:
+    enabled: true
+    decay: 0.9999
+  freeze:
+    backbone_epochs: 0
+    detect_head_epochs: 0
+  checkpoint:
+    save_period: 5
+    joint_score_weights:
+      det_map50: 0.50
+      det_map50_95: 0.20
+      lane_miou: 0.20
+      lane_f1: 0.10
+    warm_start: null
+
+eval:
+  conf_thresh: 0.001
+  nms_iou_thresh: 0.6
+  max_det: 300
+  lane_thresholds: [0.3, 0.4, 0.5, 0.6, 0.7]

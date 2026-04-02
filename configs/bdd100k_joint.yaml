@@ -1,9 +1,9 @@
-# Joint Training Configuration — YOLO26 Detection + Lane Segmentation
+# Joint Training Configuration — Vehicle Detection + Lane Segmentation
 # Used by: 08_joint_training.ipynb
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 ecocar_root: /content/drive/MyDrive/EcoCAR
-dataset_root: /content/drive/MyDrive/EcoCAR/datasets/bdd100k_yolo
+dataset_root: /content/bdd100k_yolo
 
 # Dataset directories (relative to dataset_root)
 train_images: images/train
@@ -13,41 +13,41 @@ val_images: images/val
 val_labels: labels/val
 val_masks: masks/val
 
-# ── Detection classes ─────────────────────────────────────────────────────
-nc: 10
+# ── Detection classes (vehicle-only) ─────────────────────────────────────
+nc: 5
 names:
-  0: person
-  1: rider
-  2: car
-  3: truck
-  4: bus
-  5: train
-  6: motorcycle
-  7: bicycle
-  8: traffic light
-  9: traffic sign
+  0: car
+  1: truck
+  2: bus
+  3: motorcycle
+  4: bicycle
 
 # ── Model ─────────────────────────────────────────────────────────────────
 pretrained_weights: yolo26s.pt
-lane_hidden_channels: 64
-mask_height: 180
-mask_width: 320
+mask_height: 160
+mask_width: 160
+
+lane_head:
+  type: transformer
+  embed_dim: 128
+  num_heads: 4
+  depth: 2
 
 # ── Training ──────────────────────────────────────────────────────────────
-epochs: 10
-batch_size: 8
+epochs: 30
+batch_size: 16
 img_size: 640
-lr: 0.001
-weight_decay: 0.0001
+lr: 0.002
+weight_decay: 0.0005
 
-# Loss weights (α·det + β·lane)
+# Loss weights
 det_loss_weight: 1.0
-lane_loss_weight: 0.5
+lane_loss_weight: 0.3
 
 # ── Performance ───────────────────────────────────────────────────────────
-amp: true              # Mixed precision (recommended for T4)
+amp: true
 num_workers: 4
-save_period: 5         # Save checkpoint every N epochs
+save_period: 5
 
 # ── Output ────────────────────────────────────────────────────────────────
-save_dir: /content/drive/MyDrive/EcoCAR/training_runs/joint_det_lane
+save_dir: /content/drive/MyDrive/EcoCAR/training_runs/vehicle_lane_v4

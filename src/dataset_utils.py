@@ -15,30 +15,99 @@ from typing import Dict, List, Optional, Tuple
 import yaml
 from tqdm import tqdm
 
-# ── BDD100K detection class mapping (alphabetical, canonical order) ──────────
-BDD_CLASSES = [
-    "person",
-    "rider",
-    "car",
-    "truck",
-    "bus",
-    "train",
-    "motorcycle",
-    "bicycle",
-    "traffic light",
-    "traffic sign",
+# ── BDD100K full 10-class mapping (for reference / legacy) ───────────────────
+BDD_CLASSES_FULL = [
+    "person", "rider", "car", "truck", "bus",
+    "train", "motorcycle", "bicycle", "traffic light", "traffic sign",
 ]
 
-CLASS_TO_ID = {name: idx for idx, name in enumerate(BDD_CLASSES)}
-ID_TO_CLASS = {idx: name for idx, name in enumerate(BDD_CLASSES)}
+# ── Vehicle-only classes (new primary target) ────────────────────────────────
+VEHICLE_CLASSES = ["car", "truck", "bus", "motorcycle", "bicycle"]
+
+# BDD100K category name -> vehicle class ID (0-4)
+VEHICLE_CLASS_TO_ID = {
+    "car": 0,
+    "truck": 1,
+    "bus": 2,
+    "motorcycle": 3,
+    "bicycle": 4,
+}
+
+# Legacy aliases for backward compatibility
+BDD_CLASSES = VEHICLE_CLASSES
+CLASS_TO_ID = VEHICLE_CLASS_TO_ID
+ID_TO_CLASS = {idx: name for name, idx in VEHICLE_CLASS_TO_ID.items()}
 
 
 def get_bdd_class_mapping() -> Tuple[List[str], Dict[str, int], Dict[int, str]]:
-    """Return (class_list, name→id, id→name) for BDD100K detection."""
-    return BDD_CLASSES, CLASS_TO_ID, ID_TO_CLASS
+    """Return (class_list, name→id, id→name) for vehicle-only detection."""
+    return VEHICLE_CLASSES, VEHICLE_CLASS_TO_ID, ID_TO_CLASS
 
 
 # ── BDD100K JSON → YOLO txt conversion ──────────────────────────────────────
+
+def aggregate_per_frame_jsons(
+    json_dir: str,
+    output_json: str,
+) -> int:
+    """
+    Aggregate per-frame Scalabel JSON files into a single consolidated JSON.
+
+    The official BDD100K labels zip may contain per-frame JSONs (one per image)
+    instead of a single consolidated file. This function merges them into the
+    format expected by convert_bdd100k_to_yolo():
+        [{"name": "img.jpg", "labels": [...]}, ...]
+
+    Per-frame JSONs can be either:
+      - A single dict: {"name": "...", "labels": [...]}
+      - A list with one entry: [{"name": "...", "labels": [...]}]
+      - Scalabel format with "frames" key: {"frames": [{"name": "...", ...}]}
+
+    Args:
+        json_dir:    Directory containing per-frame .json files.
+        output_json: Path to write the consolidated JSON file.
+
+    Returns:
+        Number of frames aggregated.
+    """
+    json_files = sorted([
+        f for f in os.listdir(json_dir)
+        if f.lower().endswith('.json')
+    ])
+
+    if not json_files:
+        print(f"⚠ No JSON files found in {json_dir}")
+        return 0
+
+    all_frames = []
+    for jf in tqdm(json_files, desc=f"Aggregating {os.path.basename(json_dir)}"):
+        fpath = os.path.join(json_dir, jf)
+        try:
+            with open(fpath, 'r') as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+
+        if isinstance(data, list):
+            all_frames.extend(data)
+        elif isinstance(data, dict):
+            if 'frames' in data:
+                all_frames.extend(data['frames'])
+            elif 'name' in data:
+                all_frames.append(data)
+            else:
+                # Try using the filename stem as the image name
+                stem = os.path.splitext(jf)[0]
+                data['name'] = stem + '.jpg'
+                all_frames.append(data)
+
+    os.makedirs(os.path.dirname(output_json) or '.', exist_ok=True)
+    with open(output_json, 'w') as f:
+        json.dump(all_frames, f)
+
+    print(f"✅ Aggregated {len(all_frames)} frames → {output_json}")
+    return len(all_frames)
+
 
 def convert_bdd100k_to_yolo(
     json_path: str,
@@ -149,8 +218,8 @@ def create_dataset_yaml(
         "path": dataset_root,
         "train": train_images,
         "val": val_images,
-        "nc": len(BDD_CLASSES),
-        "names": {i: name for i, name in enumerate(BDD_CLASSES)},
+        "nc": len(VEHICLE_CLASSES),
+        "names": {i: name for i, name in enumerate(VEHICLE_CLASSES)},
     }
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -344,9 +413,14 @@ def print_class_distribution(class_counts: Dict[str, int]) -> None:
     total = sum(class_counts.values())
     print(f"\n{'Class':<20} {'Count':>8} {'Pct':>7}")
     print("─" * 37)
-    for name in BDD_CLASSES:
+    for name in VEHICLE_CLASSES:
         c = class_counts.get(name, 0)
         pct = (c / total * 100) if total > 0 else 0
         print(f"{name:<20} {c:>8,} {pct:>6.1f}%")
+    # Also show non-vehicle counts if present
+    non_vehicle = {k: v for k, v in class_counts.items() if k not in VEHICLE_CLASS_TO_ID}
+    if non_vehicle:
+        skipped_total = sum(non_vehicle.values())
+        print(f"{'(non-vehicle)':<20} {skipped_total:>8,} {'skip':>7}")
     print("─" * 37)
-    print(f"{'TOTAL':<20} {total:>8,}")
+    print(f"{'TOTAL (vehicle)':<20} {total:>8,}")

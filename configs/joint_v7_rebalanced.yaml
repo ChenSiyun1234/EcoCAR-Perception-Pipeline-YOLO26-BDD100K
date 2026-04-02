@@ -1,0 +1,91 @@
+run_name: "joint_v7_rebalanced"
+seed: 42
+device: "cuda"
+amp: false
+
+data:
+  dataset_root: "/content/bdd100k_yolo"
+  img_size: 640
+  mask_height: 180
+  mask_width: 320
+  batch_size: 8
+  num_workers: 4
+  debug_limit: null
+  augmentation:
+    horizontal_flip: 0.5
+    color_jitter:
+      brightness: 0.20
+      contrast: 0.20
+      saturation: 0.12
+      hue: 0.01
+    scale_range: [0.9, 1.1]
+    blur_prob: 0.05
+    blur_kernel: 3
+  lane_targets:
+    mode: "dilated"
+    dilation_kernel: 3
+
+model:
+  backbone_weights: "yolo26s.pt"
+  use_dual_neck: true
+  interact_mode: "det_to_lane"
+  lane_proj_ch: 128
+  early_lane_idx: null
+  lane_head:
+    type: "fpn"
+    hidden_channels: 64
+
+loss:
+  lane:
+    type: "bce_dice"
+    bce_weight: 1.0
+    dice_weight: 1.0
+    pos_weight: 8.0
+    label_smoothing: 0.0
+  multitask:
+    strategy: "staged"
+    det_weight: 1.0
+    lane_weight_start: 0.0
+    lane_weight_end: 0.10
+    hold_epochs: 2
+    ramp_epochs: 10
+  detection_preservation:
+    enabled: true
+    mode: "teacher"
+    teacher_weight: 0.08
+    teacher_checkpoint: null
+    relevant_classes: [0, 1, 2, 3, 5, 6, 7, 9]
+    teacher_conf_thresh: 0.20
+
+training:
+  epochs: 20
+  optimizer:
+    lr: 3.0e-4
+    weight_decay: 1.0e-4
+    backbone_lr_scale: 0.05
+    neck_lr_scale: 0.25
+  scheduler:
+    warmup_epochs: 2
+    min_lr_ratio: 0.05
+  gradient_clip: 5.0
+  max_skip_batches: 40
+  max_skip_ratio: 0.20
+  disable_teacher_on_instability: true
+  ema:
+    enabled: true
+    decay: 0.9999
+  checkpoint:
+    save_period: 5
+    warm_start: null
+    joint_score_weights:
+      det_map50: 0.55
+      det_map50_95: 0.10
+      lane_miou: 0.25
+      lane_f1: 0.10
+
+eval:
+  lane_thresholds: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+  conf_thresh: 0.001
+  nms_iou_thresh: 0.6
+  max_det: 300
+  vehicle_classes: [2, 3, 4, 5]

@@ -1,0 +1,46 @@
+# Ablation: No detection preservation — baseline for measuring teacher benefit
+# Purpose: Quantify how much detection degrades without preservation
+
+run_name: "ablation_no_preservation"
+seed: 42
+device: "cuda"
+amp: true
+
+data:
+  dataset_root: "/content/bdd100k_yolo"
+  img_size: 640
+  mask_height: 180
+  mask_width: 320
+  batch_size: 8
+  num_workers: 4
+  augmentation:
+    horizontal_flip: 0.5
+    color_jitter: {brightness: 0.3, contrast: 0.3, saturation: 0.2, hue: 0.015}
+    scale_range: [0.8, 1.2]
+    blur_prob: 0.1
+    blur_kernel: 3
+  lane_targets:
+    mode: "dilated"
+    dilation_kernel: 3
+
+model:
+  backbone_weights: "yolo26s.pt"
+  use_dual_neck: true
+  interact_mode: "det_to_lane"
+  lane_head:
+    type: "fpn"
+
+loss:
+  lane: {type: "bce_dice", pos_weight: 10.0}
+  multitask: {strategy: "uncertainty"}
+  detection_preservation:
+    enabled: false              # <-- No preservation
+
+training:
+  epochs: 30
+  optimizer: {lr: 1.0e-3, weight_decay: 1.0e-4}
+  scheduler: {warmup_epochs: 3, min_lr_ratio: 0.01}
+  ema: {enabled: true, decay: 0.9999}
+
+eval:
+  lane_thresholds: [0.3, 0.4, 0.5, 0.6, 0.7]
