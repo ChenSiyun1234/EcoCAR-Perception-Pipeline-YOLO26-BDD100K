@@ -1,28 +1,26 @@
 """
-Shared visual backbone — ResNet + FPN.
+Shared visual backbone — ResNet + FPN, with a safe fallback lightweight CNN.
 
-Produces multi-scale feature maps [P3, P4, P5] that feed both the
-detection and lane branches.  Only the shallow ResNet stem is truly
-"shared" in the forward pass; the FPN can optionally be duplicated
-per task (future work).
-
-Design reference: RT-DETR hybrid encoder concept — but here we keep
-a standard FPN for simplicity and proven performance.
+Primary path uses torchvision ResNet to stay compatible with common Colab
+training environments. If torchvision ops are broken in a local environment,
+a simple ConvNet fallback keeps imports and debugging functional.
 """
+
+from __future__ import annotations
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision.models as models
+
+try:
+    import torchvision.models as tv_models
+    _HAS_TORCHVISION = True
+except Exception:
+    tv_models = None
+    _HAS_TORCHVISION = False
 
 
 class FPN(nn.Module):
-    """Simple Feature Pyramid Network.
-
-    Takes C3, C4, C5 from ResNet and produces P3, P4, P5 with
-    uniform channel dimension.
-    """
-
     def __init__(self, in_channels_list: list, out_channels: int = 256):
         super().__init__()
         self.lateral3 = nn.Conv2d(in_channels_list[0], out_channels, 1)
@@ -39,47 +37,59 @@ class FPN(nn.Module):
         return self.smooth3(p3), self.smooth4(p4), self.smooth5(p5)
 
 
-# Channel counts for ResNet variants at stages 2, 3, 4 (C3, C4, C5)
 _RESNET_CHANNELS = {
-    "resnet18":  [128, 256, 512],
-    "resnet34":  [128, 256, 512],
-    "resnet50":  [512, 1024, 2048],
+    "resnet18": [128, 256, 512],
+    "resnet34": [128, 256, 512],
+    "resnet50": [512, 1024, 2048],
     "resnet101": [512, 1024, 2048],
 }
 
 
-class BackboneFPN(nn.Module):
-    """ResNet backbone + FPN producing multi-scale features.
-
-    Output: list of 3 tensors [P3, P4, P5] with shape
-    [B, fpn_channels, H/8, W/8], [B, fpn_channels, H/16, W/16],
-    [B, fpn_channels, H/32, W/32].
-    """
-
-    def __init__(self, name: str = "resnet50", pretrained: bool = True,
-                 fpn_channels: int = 256):
+class TinyConvBackbone(nn.Module):
+    def __init__(self, fpn_channels: int = 256):
         super().__init__()
-        self.name = name
-        weights = "IMAGENET1K_V1" if pretrained else None
-        resnet = getattr(models, name)(weights=weights)
-
-        # Shared stem: conv1 + bn1 + relu + maxpool + layer1
         self.stem = nn.Sequential(
-            resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool,
-            resnet.layer1,
+            nn.Conv2d(3, 64, 7, stride=2, padding=3),
+            nn.GroupNorm(8, 64), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2, padding=1),
         )
-        self.layer2 = resnet.layer2  # stride 8  → C3
-        self.layer3 = resnet.layer3  # stride 16 → C4
-        self.layer4 = resnet.layer4  # stride 32 → C5
-
-        in_ch = _RESNET_CHANNELS[name]
-        self.fpn = FPN(in_ch, fpn_channels)
+        self.layer2 = nn.Sequential(nn.Conv2d(64, 128, 3, stride=2, padding=1), nn.GroupNorm(8, 128), nn.ReLU(inplace=True))
+        self.layer3 = nn.Sequential(nn.Conv2d(128, 256, 3, stride=2, padding=1), nn.GroupNorm(8, 256), nn.ReLU(inplace=True))
+        self.layer4 = nn.Sequential(nn.Conv2d(256, 512, 3, stride=2, padding=1), nn.GroupNorm(8, 512), nn.ReLU(inplace=True))
+        self.fpn = FPN([128, 256, 512], fpn_channels)
         self.out_channels = fpn_channels
 
-    def forward(self, x: torch.Tensor) -> list:
+    def forward(self, x):
         x = self.stem(x)
         c3 = self.layer2(x)
         c4 = self.layer3(c3)
         c5 = self.layer4(c4)
-        p3, p4, p5 = self.fpn(c3, c4, c5)
-        return [p3, p4, p5]
+        return list(self.fpn(c3, c4, c5))
+
+
+class BackboneFPN(nn.Module):
+    def __init__(self, name: str = "resnet50", pretrained: bool = True, fpn_channels: int = 256):
+        super().__init__()
+        self.name = name
+        if _HAS_TORCHVISION and name in _RESNET_CHANNELS:
+            weights = "IMAGENET1K_V1" if pretrained else None
+            resnet = getattr(tv_models, name)(weights=weights)
+            self.stem = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool, resnet.layer1)
+            self.layer2 = resnet.layer2
+            self.layer3 = resnet.layer3
+            self.layer4 = resnet.layer4
+            self.fpn = FPN(_RESNET_CHANNELS[name], fpn_channels)
+            self.out_channels = fpn_channels
+            self._fallback = None
+        else:
+            self._fallback = TinyConvBackbone(fpn_channels)
+            self.out_channels = fpn_channels
+
+    def forward(self, x: torch.Tensor) -> list:
+        if self._fallback is not None:
+            return self._fallback(x)
+        x = self.stem(x)
+        c3 = self.layer2(x)
+        c4 = self.layer3(c3)
+        c5 = self.layer4(c4)
+        return list(self.fpn(c3, c4, c5))
