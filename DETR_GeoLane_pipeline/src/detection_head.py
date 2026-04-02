@@ -1,23 +1,24 @@
 """
-RF-DETR / RT-DETR-inspired detection head.
+RT-DETR-inspired transformer detection decoder.
 
-This is no longer a minimal custom decoder. Key ideas adapted from recent
-real-time DETR-family repos:
-- learned content queries + learned reference points
-- iterative box refinement across decoder layers
-- per-layer prediction heads for stronger optimization
-- optional auxiliary outputs for future deep supervision
+Key ideas borrowed from RT-DETR / DETR:
+  - Learned object queries (no anchors)
+  - Multi-scale cross-attention over FPN features
+  - Direct set prediction with Hungarian matching
+  - No NMS required at inference (optional light filtering)
+
+Adapted for vehicle-only detection on BDD100K.
 """
-
-from __future__ import annotations
-
-from typing import Dict, List
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import Dict, List
 
 
 class DecoderLayer(nn.Module):
+    """Transformer decoder layer: self-attn → cross-attn → FFN."""
+
     def __init__(self, d_model: int, nhead: int, ffn_dim: int, dropout: float = 0.0):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
@@ -40,67 +41,85 @@ class DecoderLayer(nn.Module):
 
 
 class DetectionHead(nn.Module):
+    """Transformer decoder that predicts vehicle detections.
+
+    Each learned query decodes to:
+      - class logits: (num_classes + 1)  [+1 for no-object / background]
+      - box: (cx, cy, w, h) in normalized [0, 1] coordinates
+
+    Args:
+        num_classes: number of foreground classes (e.g. 5 for vehicle-only)
+        d_model: feature / query dimension
+        nhead: attention heads
+        ffn_dim: FFN hidden dimension
+        num_layers: decoder depth
+        num_queries: number of object queries
+    """
+
     def __init__(self, num_classes: int, d_model: int = 256, nhead: int = 8,
-                 ffn_dim: int = 1024, num_layers: int = 4, num_queries: int = 100,
+                 ffn_dim: int = 1024, num_layers: int = 3, num_queries: int = 100,
                  dropout: float = 0.0):
         super().__init__()
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.d_model = d_model
-        self.layers = nn.ModuleList([DecoderLayer(d_model, nhead, ffn_dim, dropout) for _ in range(num_layers)])
+
         self.query_embed = nn.Embedding(num_queries, d_model)
-        self.ref_point_head = nn.Linear(d_model, 4)
-        self.class_heads = nn.ModuleList([nn.Linear(d_model, num_classes + 1) for _ in range(num_layers)])
-        self.box_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, d_model), nn.ReLU(),
-                nn.Linear(d_model, d_model), nn.ReLU(),
-                nn.Linear(d_model, 4),
-            )
+        self.layers = nn.ModuleList([
+            DecoderLayer(d_model, nhead, ffn_dim, dropout)
             for _ in range(num_layers)
         ])
+        self.class_head = nn.Linear(d_model, num_classes + 1)
+        self.box_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, 4),
+        )
+
         self._init_weights()
 
     def _init_weights(self):
-        nn.init.normal_(self.query_embed.weight, std=0.02)
-        nn.init.xavier_uniform_(self.ref_point_head.weight)
-        nn.init.constant_(self.ref_point_head.bias, 0.0)
-        for head in self.class_heads:
-            nn.init.xavier_uniform_(head.weight)
-            nn.init.constant_(head.bias, 0.0)
-            head.bias.data[-1] = 2.0
-        for block in self.box_heads:
-            for m in block:
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    nn.init.constant_(m.bias, 0.0)
+        nn.init.xavier_uniform_(self.class_head.weight)
+        nn.init.constant_(self.class_head.bias, 0.0)
+        # Bias the no-object class slightly positive for faster convergence
+        nn.init.constant_(self.class_head.bias[-1], 2.0)
+        for layer in self.box_head:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+                nn.init.constant_(layer.bias, 0.0)
 
     def _flatten_features(self, features: List[torch.Tensor]) -> torch.Tensor:
+        """Flatten multi-scale FPN features into a single token sequence."""
         tokens = []
         for feat in features:
-            tokens.append(feat.flatten(2).permute(0, 2, 1))
-        return torch.cat(tokens, dim=1)
+            B, C, H, W = feat.shape
+            tokens.append(feat.flatten(2).permute(0, 2, 1))  # (B, H*W, C)
+        return torch.cat(tokens, dim=1)  # (B, total_tokens, C)
 
     def forward(self, features: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            features: list of [P3, P4, P5] from backbone/encoder
+
+        Returns:
+            dict with:
+              pred_logits: (B, num_queries, num_classes+1)
+              pred_boxes:  (B, num_queries, 4) — sigmoid-activated (cx,cy,w,h)
+              query_features: (B, num_queries, d_model) — for cross-branch attention
+        """
         B = features[0].shape[0]
         memory = self._flatten_features(features)
-        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        ref_boxes = self.ref_point_head(queries).sigmoid()
 
-        aux_logits = []
-        aux_boxes = []
-        for layer, cls_head, box_head in zip(self.layers, self.class_heads, self.box_heads):
+        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
+
+        for layer in self.layers:
             queries = layer(queries, memory)
-            logits = cls_head(queries)
-            delta = box_head(queries)
-            ref_boxes = torch.sigmoid(torch.logit(ref_boxes.clamp(1e-4, 1 - 1e-4)) + delta)
-            aux_logits.append(logits)
-            aux_boxes.append(ref_boxes)
+
+        pred_logits = self.class_head(queries)
+        pred_boxes = self.box_head(queries).sigmoid()
 
         return {
-            "pred_logits": aux_logits[-1],
-            "pred_boxes": aux_boxes[-1],
-            "aux_logits": aux_logits[:-1],
-            "aux_boxes": aux_boxes[:-1],
-            "query_features": queries,
+            "pred_logits": pred_logits,     # (B, Q, C+1)
+            "pred_boxes": pred_boxes,       # (B, Q, 4)
+            "query_features": queries,      # (B, Q, D)
         }

@@ -1,22 +1,33 @@
 """
-CLRerNet / MapTR-inspired lane head.
+Query-based transformer lane prediction head.
 
-Adapted ideas:
-- learned lane priors / anchors rather than free-form MLP-only decoding
-- iterative refinement of polyline geometry across decoder layers
-- query-based set prediction compatible with Hungarian assignment
-- outputs query features for future temporal memory and association
+Each lane query predicts a structured lane representation:
+  - existence probability (is there a lane?)
+  - ordered polyline: N points (x, y) in normalized image coordinates
+  - per-point visibility mask
+  - lane type classification
+
+Design references:
+  - MapTR (query-based vectorized map elements)
+  - CLRNet (lane detection with row anchors + refinement)
+
+The decoder predicts lanes as ordered point sequences, NOT raster masks.
+This is the key departure from the old pipeline.
+
+TODO: future temporal extension
+  - Add a temporal memory bank that caches lane queries across frames
+  - StreamMapNet-style temporal propagation
+  - The query_features output is designed to feed into such a memory bank
 """
-
-from __future__ import annotations
-
-from typing import Dict, List
 
 import torch
 import torch.nn as nn
+from typing import Dict, List
 
 
 class LaneDecoderLayer(nn.Module):
+    """Same structure as detection decoder layer."""
+
     def __init__(self, d_model: int, nhead: int, ffn_dim: int, dropout: float = 0.0):
         super().__init__()
         self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout, batch_first=True)
@@ -39,48 +50,55 @@ class LaneDecoderLayer(nn.Module):
 
 
 class LaneHead(nn.Module):
+    """Query-based lane prediction head.
+
+    Each lane query decodes to:
+      - exist_logit: scalar (lane existence)
+      - points: (N, 2) ordered polyline in normalized coords [0, 1]
+      - visibility: (N,) per-point visibility logit
+      - type_logits: (num_lane_types,) lane type classification
+
+    Args:
+        num_lane_types: number of lane type categories
+        num_points: points per lane polyline
+        d_model: feature / query dimension
+        num_queries: number of lane queries (max lanes per image)
+    """
+
     def __init__(self, num_lane_types: int = 7, num_points: int = 72,
                  d_model: int = 256, nhead: int = 8, ffn_dim: int = 1024,
-                 num_layers: int = 4, num_queries: int = 12,
+                 num_layers: int = 3, num_queries: int = 10,
                  dropout: float = 0.0):
         super().__init__()
         self.num_queries = num_queries
         self.num_points = num_points
         self.d_model = d_model
+
         self.query_embed = nn.Embedding(num_queries, d_model)
-        self.layers = nn.ModuleList([LaneDecoderLayer(d_model, nhead, ffn_dim, dropout) for _ in range(num_layers)])
-        self.exist_heads = nn.ModuleList([nn.Linear(d_model, 1) for _ in range(num_layers)])
-        self.type_heads = nn.ModuleList([nn.Linear(d_model, num_lane_types) for _ in range(num_layers)])
-        self.vis_heads = nn.ModuleList([nn.Linear(d_model, num_points) for _ in range(num_layers)])
-        self.delta_heads = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(d_model, d_model), nn.ReLU(),
-                nn.Linear(d_model, d_model), nn.ReLU(),
-                nn.Linear(d_model, num_points * 2),
-            )
+        self.layers = nn.ModuleList([
+            LaneDecoderLayer(d_model, nhead, ffn_dim, dropout)
             for _ in range(num_layers)
         ])
-        self.register_buffer("lane_priors", self._build_lane_priors(num_queries, num_points), persistent=False)
+
+        # Prediction heads
+        self.exist_head = nn.Linear(d_model, 1)
+        self.point_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, num_points * 2),
+        )
+        self.vis_head = nn.Linear(d_model, num_points)
+        self.type_head = nn.Linear(d_model, num_lane_types)
+
         self._init_weights()
 
-    def _build_lane_priors(self, q: int, n: int) -> torch.Tensor:
-        priors = []
-        xs = torch.linspace(0.12, 0.88, q)
-        ys = torch.linspace(0.20, 0.98, n)
-        for i in range(q):
-            x = torch.full((n,), xs[i])
-            priors.append(torch.stack([x, ys], dim=-1))
-        return torch.stack(priors, dim=0)
-
     def _init_weights(self):
-        nn.init.normal_(self.query_embed.weight, std=0.02)
-        for head in self.exist_heads:
-            nn.init.constant_(head.bias, -2.5)
-        for block in self.delta_heads:
-            for m in block:
-                if isinstance(m, nn.Linear):
-                    nn.init.xavier_uniform_(m.weight)
-                    nn.init.constant_(m.bias, 0.0)
+        # Initialize existence head with negative bias (most queries = no lane)
+        nn.init.constant_(self.exist_head.bias, -3.0)
+        for m in self.point_head:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0.0)
 
     def _flatten_features(self, features: List[torch.Tensor]) -> torch.Tensor:
         tokens = []
@@ -89,30 +107,36 @@ class LaneHead(nn.Module):
         return torch.cat(tokens, dim=1)
 
     def forward(self, features: List[torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            features: list of [P3, P4, P5] from backbone/encoder
+
+        Returns:
+            dict with:
+              exist_logits: (B, Q, 1)
+              pred_points:  (B, Q, N, 2) — sigmoid-activated normalized coords
+              vis_logits:   (B, Q, N) — per-point visibility logits
+              type_logits:  (B, Q, num_lane_types)
+              query_features: (B, Q, D) — for cross-branch / temporal memory
+        """
         B = features[0].shape[0]
         memory = self._flatten_features(features)
-        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
-        curve = self.lane_priors.unsqueeze(0).expand(B, -1, -1, -1).clone()
 
-        aux_exist, aux_points, aux_vis, aux_type = [], [], [], []
-        for layer, exist_head, delta_head, vis_head, type_head in zip(
-                self.layers, self.exist_heads, self.delta_heads, self.vis_heads, self.type_heads):
+        queries = self.query_embed.weight.unsqueeze(0).expand(B, -1, -1)
+
+        for layer in self.layers:
             queries = layer(queries, memory)
-            delta = delta_head(queries).view(B, self.num_queries, self.num_points, 2)
-            curve = torch.sigmoid(torch.logit(curve.clamp(1e-4, 1 - 1e-4)) + delta)
-            aux_exist.append(exist_head(queries))
-            aux_points.append(curve)
-            aux_vis.append(vis_head(queries))
-            aux_type.append(type_head(queries))
+
+        exist_logits = self.exist_head(queries)               # (B, Q, 1)
+        raw_points = self.point_head(queries)                 # (B, Q, N*2)
+        pred_points = raw_points.view(B, self.num_queries, self.num_points, 2).sigmoid()
+        vis_logits = self.vis_head(queries)                   # (B, Q, N)
+        type_logits = self.type_head(queries)                 # (B, Q, T)
 
         return {
-            "exist_logits": aux_exist[-1],
-            "pred_points": aux_points[-1],
-            "vis_logits": aux_vis[-1],
-            "type_logits": aux_type[-1],
-            "aux_exist_logits": aux_exist[:-1],
-            "aux_pred_points": aux_points[:-1],
-            "aux_vis_logits": aux_vis[:-1],
-            "aux_type_logits": aux_type[:-1],
-            "query_features": queries,
+            "exist_logits": exist_logits,
+            "pred_points": pred_points,
+            "vis_logits": vis_logits,
+            "type_logits": type_logits,
+            "query_features": queries,  # TODO: feed into temporal memory bank
         }
