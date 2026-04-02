@@ -21,7 +21,7 @@ TRAINING_RUNS    = os.path.join(ECOCAR_ROOT, "training_runs")
 OUTPUTS_DIR      = os.path.join(ECOCAR_ROOT, "outputs")
 VIDEO_DIR        = os.path.join(ECOCAR_ROOT, "video")
 DOWNLOADS_DIR    = os.path.join(ECOCAR_ROOT, "downloads")
-RAW_DATASET_ROOT = os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_raw")
+RAW_DATASET_ROOT = "/content/bdd100k_labels_unzipped"
 PATHS_CONFIG     = os.path.join(ECOCAR_ROOT, "paths_config.yaml")
 
 # Local fast‑IO mirror (Colab local SSD — extracted from Drive tars)
@@ -133,7 +133,6 @@ class Config:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
-
 def _read_paths_config_for_raw_dir() -> Optional[str]:
     if not os.path.isfile(PATHS_CONFIG):
         return None
@@ -151,19 +150,18 @@ def _read_paths_config_for_raw_dir() -> Optional[str]:
 
 
 def ensure_bdd_labels_unzipped(force: bool = False) -> Tuple[Optional[str], list]:
-    """Extract bdd100k_labels.zip into a local fast path and return the extract root."""
-    tried = []
-    # Prefer fast local path in /content, fall back to configured raw dir if provided.
-    raw_root = "/content/bdd100k_labels_unzipped"
-    cfg_raw = _read_paths_config_for_raw_dir()
-    if cfg_raw and os.path.isdir(cfg_raw):
-        # keep for discovery, but unzip target stays local for speed
-        pass
+    """
+    Make sure bdd100k_labels.zip from Drive downloads is extracted.
 
+    Returns:
+        raw_root: extracted directory candidate or None
+        tried: list of checked paths
+    """
+    tried = []
+    raw_root = _read_paths_config_for_raw_dir() or RAW_DATASET_ROOT
     candidate_zips = [
         os.path.join(DOWNLOADS_DIR, "bdd100k_labels.zip"),
         os.path.join(ECOCAR_ROOT, "downloads", "bdd100k_labels.zip"),
-        os.path.join(ECOCAR_ROOT, "datasets", "bdd100k_labels.zip"),
     ]
     for zpath in candidate_zips:
         tried.append(zpath)
@@ -176,21 +174,13 @@ def ensure_bdd_labels_unzipped(force: bool = False) -> Tuple[Optional[str], list
                 with open(stamp, "w") as f:
                     f.write("ok\n")
             return raw_root, tried
-    # if already manually extracted, still allow it
-    if os.path.isdir(raw_root):
-        return raw_root, tried
-    if cfg_raw and os.path.isdir(cfg_raw):
-        return cfg_raw, tried
     return None, tried
 
 
 def get_lane_label_candidates(split: str = "train") -> list:
-    raw_root = ensure_bdd_labels_unzipped(False)[0] or (_read_paths_config_for_raw_dir() or RAW_DATASET_ROOT)
-    # Real discovered structure from user's bdd100k_labels.zip:
-    #   /content/bdd100k_labels_unzipped/100k/train/*.json
-    # Also keep legacy aggregate-json fallbacks.
+    raw_root = _read_paths_config_for_raw_dir() or RAW_DATASET_ROOT
     cands = [
-        os.path.join(raw_root, "100k", split),  # per-image json directory (preferred)
+        os.path.join(raw_root, "100k", split),
         os.path.join(raw_root, "bdd100k", "100k", split),
         os.path.join(raw_root, "bdd100k", "labels", f"bdd100k_labels_images_{split}.json"),
         os.path.join(raw_root, "labels", f"bdd100k_labels_images_{split}.json"),
@@ -208,54 +198,16 @@ def get_lane_label_candidates(split: str = "train") -> list:
 
 def find_lane_labels(split: str = "train", auto_extract: bool = True, return_tried: bool = False):
     tried = []
-    raw_root = None
-    zip_candidates = []
     if auto_extract:
-        raw_root, zip_candidates = ensure_bdd_labels_unzipped(force=False)
-        tried.extend(zip_candidates)
+        _, tried_zip = ensure_bdd_labels_unzipped(force=False)
+        tried.extend(tried_zip)
+
     candidates = get_lane_label_candidates(split)
     tried.extend(candidates)
-    chosen = None
     for path in candidates:
-        if os.path.isdir(path):
-            # Must contain per-image JSON files.
-            try:
-                if any(name.lower().endswith(".json") for name in os.listdir(path)):
-                    chosen = path
-                    break
-            except Exception:
-                pass
-        elif os.path.isfile(path):
-            chosen = path
-            break
-    if return_tried:
-        return chosen, tried
-    return chosen
-
-
-def lane_search_debug(split: str = "train") -> dict:
-    raw_root, zip_candidates = ensure_bdd_labels_unzipped(force=False)
-    candidates = get_lane_label_candidates(split)
-    chosen = None
-    for p in candidates:
-        if os.path.isdir(p):
-            try:
-                if any(name.lower().endswith(".json") for name in os.listdir(p)):
-                    chosen = p
-                    break
-            except Exception:
-                pass
-        elif os.path.isfile(p):
-            chosen = p
-            break
-    return {
-        "split": split,
-        "raw_root": raw_root,
-        "zip_candidates": zip_candidates,
-        "candidates": candidates,
-        "chosen": chosen,
-        "chosen_is_dir": bool(chosen and os.path.isdir(chosen)),
-    }
+        if os.path.isfile(path) or os.path.isdir(path):
+            return (path, tried) if return_tried else path
+    return (None, tried) if return_tried else None
 
 
 def ensure_dirs(cfg: Config):
