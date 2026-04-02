@@ -73,14 +73,16 @@ class DetectionMetrics:
             return
 
         dev = self.device
+        has_preds = pred_boxes.dim() >= 2 and pred_boxes.shape[0] > 0
+        has_gt = gt_boxes.dim() >= 2 and gt_boxes.shape[0] > 0
         pred_dict = {
-            'boxes': pred_boxes[:, :4].to(dev) if len(pred_boxes) else self._empty_boxes(dev),
-            'scores': pred_boxes[:, 4].to(dev) if len(pred_boxes) else self._empty_scores(dev),
-            'labels': pred_boxes[:, 5].long().to(dev) if len(pred_boxes) else self._empty_labels(dev),
+            'boxes': pred_boxes[:, :4].to(dev) if has_preds else self._empty_boxes(dev),
+            'scores': pred_boxes[:, 4].to(dev) if has_preds else self._empty_scores(dev),
+            'labels': pred_boxes[:, 5].long().to(dev) if has_preds else self._empty_labels(dev),
         }
         target_dict = {
-            'boxes': gt_boxes.to(dev) if len(gt_boxes) else self._empty_boxes(dev),
-            'labels': gt_labels.long().to(dev) if len(gt_labels) else self._empty_labels(dev),
+            'boxes': gt_boxes.to(dev) if has_gt else self._empty_boxes(dev),
+            'labels': gt_labels.long().to(dev) if has_gt else self._empty_labels(dev),
         }
         self._map.update([pred_dict], [target_dict])
 

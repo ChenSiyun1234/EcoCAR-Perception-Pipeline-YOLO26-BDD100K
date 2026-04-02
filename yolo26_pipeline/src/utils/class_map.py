@@ -87,8 +87,8 @@ def remap_preds_to_vehicle_names(pred_boxes: torch.Tensor) -> torch.Tensor:
     This function exists for API compatibility. It simply passes through
     and filters any out-of-range class IDs (shouldn't happen with nc=5).
     """
-    if len(pred_boxes) == 0:
-        return pred_boxes
+    if pred_boxes.dim() == 0 or pred_boxes.shape[0] == 0:
+        return pred_boxes if pred_boxes.dim() >= 2 else torch.empty((0, 6))
     valid = pred_boxes[:, 5] < NUM_VEHICLE_CLASSES
     return pred_boxes[valid]
 

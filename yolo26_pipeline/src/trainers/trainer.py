@@ -327,10 +327,72 @@ class JointTrainer:
 
         return masks
 
-    # ── Training ──────────────────────────────────────────────────────────
+    # ── Detection output decoding ────────────────────────────────────────
 
-    
-    
+    def _decode_det_output(self, det_out, batch_size: int) -> list:
+        """Decode detect head output into a list of per-image prediction tensors.
+
+        Handles all YOLO output formats:
+        - Eval end2end: tuple (y_postprocessed, preds_dict)
+        - Eval standard: single tensor for NMS
+        - Train dict: {"one2many": ..., "one2one": ...}
+        """
+        try:
+            from ultralytics.utils.nms import non_max_suppression
+        except ImportError:
+            from ultralytics.utils.ops import non_max_suppression
+
+        # Case 1: tuple (y_postprocessed, preds_dict) from end2end eval
+        if isinstance(det_out, (tuple, list)):
+            # Check if first element is postprocessed predictions
+            first = det_out[0]
+            if isinstance(first, torch.Tensor):
+                if first.dim() == 3 and first.shape[-1] == 6:
+                    # Already postprocessed [B, max_det, 6]
+                    preds = []
+                    for bi in range(first.shape[0]):
+                        valid = first[bi][:, 4] > self.conf_thresh
+                        preds.append(first[bi][valid])
+                    return preds
+                elif first.dim() >= 2:
+                    # Raw predictions — run NMS
+                    return non_max_suppression(
+                        first, conf_thres=self.conf_thresh,
+                        iou_thres=self.nms_iou, max_det=self.max_det)
+
+        # Case 2: single tensor
+        if isinstance(det_out, torch.Tensor) and det_out.dim() >= 2:
+            return non_max_suppression(
+                det_out, conf_thres=self.conf_thresh,
+                iou_thres=self.nms_iou, max_det=self.max_det)
+
+        # Case 3: dict (train mode — shouldn't happen in validate, but handle it)
+        if isinstance(det_out, dict):
+            key = "one2one" if "one2one" in det_out else "one2many"
+            raw = det_out[key]
+            if isinstance(raw, dict) and "feats" in raw:
+                feats = raw["feats"]
+                # Manually concat features for NMS
+                nc = self.model.detect_head.nc
+                reg_max = self.model.detect_head.reg_max
+                bs = feats[0].shape[0]
+                boxes, scores = [], []
+                for xi in feats:
+                    b, s = xi.split([4 * reg_max, nc], dim=1)
+                    boxes.append(b.reshape(bs, 4 * reg_max, -1))
+                    scores.append(s.reshape(bs, nc, -1))
+                formatted = torch.cat([
+                    torch.cat(boxes, dim=-1),
+                    torch.cat(scores, dim=-1),
+                ], dim=1).permute(0, 2, 1)
+                return non_max_suppression(
+                    formatted, conf_thres=self.conf_thresh,
+                    iou_thres=self.nms_iou, max_det=self.max_det)
+
+        # Fallback: empty predictions
+        return [torch.empty((0, 6))] * batch_size
+
+    # ── Training ──────────────────────────────────────────────────────────
 
     def _backward(self, loss: torch.Tensor):
         if self.amp and self.scaler is not None:
@@ -554,31 +616,15 @@ class JointTrainer:
             # - Train mode: dict {"one2many": ..., "one2one": ...}
             # - Eval mode:  tuple (y_postprocessed, preds_dict)
             #   where y_postprocessed is [B, max_det, 6] (x1,y1,x2,y2,conf,cls)
-            if isinstance(det_out, (tuple, list)) and len(det_out) == 2:
-                y_post = det_out[0]
-                if isinstance(y_post, torch.Tensor) and y_post.dim() == 3 and y_post.shape[-1] == 6:
-                    # Already postprocessed — use directly, no NMS needed
-                    preds = []
-                    for bi in range(y_post.shape[0]):
-                        valid = y_post[bi][:, 4] > self.conf_thresh
-                        preds.append(y_post[bi][valid])
-                else:
-                    # Fallback: standard NMS
-                    preds = non_max_suppression(y_post, conf_thres=self.conf_thresh,
-                                                iou_thres=self.nms_iou, max_det=self.max_det)
-            elif isinstance(det_out, torch.Tensor):
-                preds = non_max_suppression(det_out, conf_thres=self.conf_thresh,
-                                            iou_thres=self.nms_iou, max_det=self.max_det)
-            else:
-                # Dict format (shouldn't happen in eval mode, but handle gracefully)
-                preds = [torch.empty((0, 6), device=images.device)] * images.shape[0]
+            preds = self._decode_det_output(det_out, images.shape[0])
 
             for bi in range(images.shape[0]):
-                pred_boxes = preds[bi].cpu()
+                pred_boxes = preds[bi].cpu() if preds[bi].dim() > 0 else torch.empty((0, 6))
                 # Track detection diagnostics
                 total_images += 1
-                total_preds += len(pred_boxes)
-                if len(pred_boxes) > 0:
+                n_preds = pred_boxes.shape[0] if pred_boxes.dim() > 0 else 0
+                total_preds += n_preds
+                if n_preds > 0:
                     total_conf += pred_boxes[:, 4].sum().item()
                 # Filter predictions to valid vehicle classes (0-4)
                 pred_boxes = remap_preds_to_vehicle_names(pred_boxes)
@@ -587,12 +633,12 @@ class JointTrainer:
                 if det_targets.shape[0] > 0:
                     img_mask = det_targets[:, 0] == bi
                     img_gt = det_targets[img_mask]
-                    if len(img_gt) > 0:
+                    if img_gt.shape[0] > 0:
                         gt_cls = img_gt[:, 1].long()
                         gt_xywh = img_gt[:, 2:6]
                         # Convert YOLO normalized to pixel coords
                         _, _, h, w = images.shape
-                        gt_boxes = torch.zeros(len(gt_xywh), 4)
+                        gt_boxes = torch.zeros(gt_xywh.shape[0], 4)
                         gt_boxes[:, 0] = (gt_xywh[:, 0] - gt_xywh[:, 2] / 2) * w
                         gt_boxes[:, 1] = (gt_xywh[:, 1] - gt_xywh[:, 3] / 2) * h
                         gt_boxes[:, 2] = (gt_xywh[:, 0] + gt_xywh[:, 2] / 2) * w

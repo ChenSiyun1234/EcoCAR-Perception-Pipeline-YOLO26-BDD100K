@@ -1,0 +1,66 @@
+run_name: dualpath_v1
+device: cuda
+amp: true
+seed: 42
+
+# Data
+dataset_root: /content/bdd100k_yolo
+img_size: 640
+batch_size: 8
+num_workers: 4
+max_lanes: 10
+lane_points: 72
+use_expanded_classes: false
+
+# Backbone
+backbone: resnet50
+pretrained: true
+fpn_channels: 256
+
+# Detection head (RT-DETR-inspired)
+det_num_queries: 100
+det_enc_layers: 1
+det_dec_layers: 3
+det_dim: 256
+det_nhead: 8
+det_ffn_dim: 1024
+det_dropout: 0.0
+
+# Lane head (MapTR-inspired query-based)
+lane_num_queries: 10
+lane_enc_layers: 1
+lane_dec_layers: 3
+lane_dim: 256
+lane_nhead: 8
+lane_ffn_dim: 1024
+lane_dropout: 0.0
+
+# Cross-branch communication
+cross_attn: true
+cross_attn_layers: 1
+
+# Optimizer
+lr: 0.0001
+backbone_lr_scale: 0.1
+weight_decay: 0.0001
+epochs: 50
+warmup_epochs: 5
+min_lr_ratio: 0.01
+
+# Loss weights
+det_cls_weight: 2.0
+det_l1_weight: 5.0
+det_giou_weight: 2.0
+lane_exist_weight: 2.0
+lane_pts_weight: 5.0
+lane_type_weight: 1.0
+det_task_weight: 1.0
+lane_task_weight: 1.0
+
+# Evaluation
+conf_thresh: 0.3
+nms_iou: 0.5
+lane_match_thresh: 15.0
+
+# Training
+patience: 15
