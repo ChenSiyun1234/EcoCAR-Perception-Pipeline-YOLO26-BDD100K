@@ -1,82 +1,149 @@
+"""
+Evaluation metrics for both tasks.
 
-"""Metrics for detection and geometric lane evaluation."""
+Detection: mAP@50, mAP@50-95 using torchmetrics
+Lane: F1-score based on point distance matching, plus Chamfer distance
+"""
+
+import math
 import torch
-from typing import Dict
-from .losses import bidirectional_curve_distance, box_cxcywh_to_xyxy
+import numpy as np
+from typing import Dict, List
+
 
 class DetectionMetrics:
-    def __init__(self, num_classes: int, device: str = 'cuda', iou_thresh: float = 0.5):
-        self.num_classes = num_classes; self.device = device; self.iou_thresh = iou_thresh; self.reset()
+    """mAP computation using torchmetrics MeanAveragePrecision."""
+
+    def __init__(self, num_classes: int = 5, device: str = "cpu"):
+        self.num_classes = num_classes
+        self.device = device
+        try:
+            from torchmetrics.detection import MeanAveragePrecision
+            self._map = MeanAveragePrecision(box_format="xyxy", iou_type="bbox").to(device)
+            self._has_tm = True
+        except ImportError:
+            self._has_tm = False
+            print("  torchmetrics not available — detection metrics disabled")
+
     def reset(self):
-        self.tp = 0; self.fp = 0; self.fn = 0
-    def _iou(self, boxes1, boxes2):
-        if boxes1.numel() == 0 or boxes2.numel() == 0:
-            return boxes1.new_zeros((boxes1.shape[0], boxes2.shape[0]))
-        lt = torch.max(boxes1[:,None,:2], boxes2[None,:,:2]); rb = torch.min(boxes1[:,None,2:], boxes2[None,:,2:])
-        inter = (rb-lt).clamp(min=0).prod(dim=-1)
-        a1 = (boxes1[:,2]-boxes1[:,0]).clamp(min=0)*(boxes1[:,3]-boxes1[:,1]).clamp(min=0)
-        a2 = (boxes2[:,2]-boxes2[:,0]).clamp(min=0)*(boxes2[:,3]-boxes2[:,1]).clamp(min=0)
-        union = a1[:,None] + a2[None,:] - inter
-        return inter / union.clamp(min=1e-6)
-    def update(self, pred_boxes, pred_scores, pred_labels, gt_boxes, gt_labels):
-        if pred_boxes.numel() == 0 and gt_boxes.numel() == 0: return
-        matched_gt = set()
-        order = torch.argsort(pred_scores, descending=True)
-        pred_boxes = pred_boxes[order]; pred_labels = pred_labels[order]
-        for pb, pl in zip(pred_boxes, pred_labels):
-            candidates = torch.where(gt_labels == pl)[0]
-            if len(candidates) == 0:
-                self.fp += 1; continue
-            ious = self._iou(pb.unsqueeze(0), gt_boxes[candidates]).squeeze(0)
-            best_rel = int(torch.argmax(ious).item()); best_iou = float(ious[best_rel].item()); best_idx = int(candidates[best_rel].item())
-            if best_iou >= self.iou_thresh and best_idx not in matched_gt:
-                self.tp += 1; matched_gt.add(best_idx)
-            else:
-                self.fp += 1
-        self.fn += max(0, gt_boxes.shape[0] - len(matched_gt))
-    def compute(self) -> Dict[str,float]:
-        prec = self.tp / max(self.tp + self.fp, 1); rec = self.tp / max(self.tp + self.fn, 1)
-        ap50 = prec * rec
-        return {'det_precision': prec, 'det_recall': rec, 'det_map50': ap50}
+        if self._has_tm:
+            self._map.reset()
+
+    @torch.no_grad()
+    def update(self, pred_boxes: torch.Tensor, pred_scores: torch.Tensor,
+               pred_labels: torch.Tensor, gt_boxes: torch.Tensor,
+               gt_labels: torch.Tensor):
+        """Update with predictions and GT for one image."""
+        if not self._has_tm:
+            return
+        dev = self.device
+        preds = [{
+            "boxes": pred_boxes.to(dev) if pred_boxes.shape[0] > 0 else torch.empty((0, 4), device=dev),
+            "scores": pred_scores.to(dev) if pred_scores.shape[0] > 0 else torch.empty(0, device=dev),
+            "labels": pred_labels.long().to(dev) if pred_labels.shape[0] > 0 else torch.empty(0, dtype=torch.long, device=dev),
+        }]
+        targets = [{
+            "boxes": gt_boxes.to(dev) if gt_boxes.shape[0] > 0 else torch.empty((0, 4), device=dev),
+            "labels": gt_labels.long().to(dev) if gt_labels.shape[0] > 0 else torch.empty(0, dtype=torch.long, device=dev),
+        }]
+        self._map.update(preds, targets)
+
+    def compute(self) -> Dict[str, float]:
+        if not self._has_tm:
+            return {"det_map50": 0.0, "det_map50_95": 0.0}
+        result = self._map.compute()
+        safe = lambda x: max(0.0, float(x.item())) if torch.isfinite(x) else 0.0
+        return {
+            "det_map50": safe(result.get("map_50", torch.tensor(0.0))),
+            "det_map50_95": safe(result.get("map", torch.tensor(0.0))),
+        }
+
 
 class LaneMetrics:
+    """Lane evaluation based on point-distance matching.
+
+    A predicted lane is "matched" to a GT lane if the average point
+    distance is below a threshold.  From matched pairs we compute
+    precision, recall, and F1.
+
+    Also computes Chamfer distance as a continuous metric.
+    """
+
     def __init__(self, match_thresh_px: float = 15.0, img_size: int = 640):
-        self.match_thresh_px = match_thresh_px; self.img_size = img_size; self.reset()
+        self.match_thresh = match_thresh_px / img_size  # normalized threshold
+        self.tp = 0
+        self.fp = 0
+        self.fn = 0
+        self.chamfer_sum = 0.0
+        self.chamfer_count = 0
+
     def reset(self):
-        self.tp = 0; self.fp = 0; self.fn = 0; self.curve_sum = 0.0; self.curve_count = 0; self.miou_sum = 0.0; self.miou_count = 0
-    def _rasterize(self, pts: torch.Tensor, h: int, w: int, thickness: int = 2):
-        import cv2, numpy as np
-        mask = np.zeros((h,w), dtype=np.uint8)
-        arr = pts.detach().cpu().numpy().copy()
-        arr[:,0] = np.clip(arr[:,0] * w, 0, w-1); arr[:,1] = np.clip(arr[:,1] * h, 0, h-1)
-        arr = arr.astype(np.int32)
-        if arr.shape[0] >= 2:
-            cv2.polylines(mask, [arr], False, 1, thickness)
-        return torch.from_numpy(mask)
-    def update(self, pred_points, pred_exist, gt_points, gt_exist):
-        pred_keep = (pred_exist[:,0].sigmoid() > 0.5)
-        pred_pts = pred_points[pred_keep]
+        self.tp = self.fp = self.fn = 0
+        self.chamfer_sum = self.chamfer_count = 0
+
+    @torch.no_grad()
+    def update(self, pred_points: torch.Tensor, pred_exist: torch.Tensor,
+               gt_points: torch.Tensor, gt_exist: torch.Tensor,
+               exist_thresh: float = 0.5):
+        """Update for one image.
+
+        Args:
+            pred_points: (Q, N, 2) normalized
+            pred_exist: (Q, 1) logits
+            gt_points: (max_lanes, N, 2) normalized
+            gt_exist: (max_lanes,) float
+        """
+        pred_mask = pred_exist[:, 0].sigmoid() > exist_thresh
         gt_mask = gt_exist > 0.5
-        gt_pts = gt_points[gt_mask]
-        n_pred, n_gt = pred_pts.shape[0], gt_pts.shape[0]
-        if n_pred == 0 and n_gt == 0: return
-        matched_gt = set()
+
+        n_pred = pred_mask.sum().item()
+        n_gt = gt_mask.sum().item()
+
+        if n_gt == 0 and n_pred == 0:
+            return
+        if n_gt == 0:
+            self.fp += n_pred
+            return
+        if n_pred == 0:
+            self.fn += n_gt
+            return
+
+        pred_pts = pred_points[pred_mask]  # (n_pred, N, 2)
+        gt_pts = gt_points[gt_mask]        # (n_gt, N, 2)
+
+        # Distance matrix: average point distance
+        dist = torch.zeros(n_pred, n_gt)
         for i in range(n_pred):
-            best_j, best_d = -1, 1e9
             for j in range(n_gt):
-                d = float((bidirectional_curve_distance(pred_pts[i] * self.img_size, gt_pts[j] * self.img_size)).item())
-                if d < best_d:
-                    best_d, best_j = d, j
-            if best_j >= 0 and best_d <= self.match_thresh_px and best_j not in matched_gt:
-                self.tp += 1; matched_gt.add(best_j); self.curve_sum += best_d; self.curve_count += 1
-                pm = self._rasterize(pred_pts[i], self.img_size, self.img_size)
-                gm = self._rasterize(gt_pts[best_j], self.img_size, self.img_size)
-                inter = ((pm > 0) & (gm > 0)).sum().item(); union = ((pm > 0) | (gm > 0)).sum().item()
-                self.miou_sum += inter / max(union, 1); self.miou_count += 1
-            else:
-                self.fp += 1
-        self.fn += max(0, n_gt - len(matched_gt))
-    def compute(self) -> Dict[str,float]:
-        prec = self.tp / max(self.tp + self.fp, 1); rec = self.tp / max(self.tp + self.fn, 1); f1 = 2*prec*rec/max(prec+rec, 1e-9)
-        curve = self.curve_sum / max(self.curve_count, 1); miou = self.miou_sum / max(self.miou_count, 1)
-        return {'lane_f1': f1, 'lane_precision': prec, 'lane_recall': rec, 'lane_curve_dist_px': curve, 'lane_miou': miou}
+                dist[i, j] = (pred_pts[i] - gt_pts[j]).norm(dim=-1).mean()
+
+        # Greedy matching (simple, fast)
+        matched_pred = set()
+        matched_gt = set()
+        # Sort all (pred, gt) pairs by distance
+        flat = [(dist[i, j].item(), i, j) for i in range(n_pred) for j in range(n_gt)]
+        flat.sort()
+        for d, i, j in flat:
+            if i in matched_pred or j in matched_gt:
+                continue
+            if d < self.match_thresh:
+                matched_pred.add(i)
+                matched_gt.add(j)
+                self.tp += 1
+                self.chamfer_sum += d
+                self.chamfer_count += 1
+
+        self.fp += n_pred - len(matched_pred)
+        self.fn += n_gt - len(matched_gt)
+
+    def compute(self) -> Dict[str, float]:
+        prec = self.tp / max(self.tp + self.fp, 1)
+        rec = self.tp / max(self.tp + self.fn, 1)
+        f1 = 2 * prec * rec / max(prec + rec, 1e-6)
+        chamfer = self.chamfer_sum / max(self.chamfer_count, 1)
+        return {
+            "lane_f1": f1,
+            "lane_precision": prec,
+            "lane_recall": rec,
+            "lane_chamfer": chamfer,
+        }
