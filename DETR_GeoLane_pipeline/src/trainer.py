@@ -3,7 +3,7 @@ import json
 import math
 import os
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 from torch.amp import GradScaler
@@ -37,13 +37,74 @@ class Trainer:
         self.scaler = GradScaler("cuda", enabled=cfg.amp) if cfg.device == "cuda" else None
         nc = 7 if cfg.use_expanded_classes else 5
         self.det_metrics = DetectionMetrics(num_classes=nc, device=cfg.device)
-        self.lane_metrics = LaneMetrics(match_thresh_px=cfg.lane_match_thresh, img_size=cfg.img_size,
-                                        raster_h=cfg.lane_raster_h, raster_w=cfg.lane_raster_w,
-                                        raster_thickness=cfg.lane_raster_thickness)
+        self.lane_metrics = LaneMetrics(
+            match_thresh_px=cfg.lane_match_thresh,
+            img_size=cfg.img_size,
+            raster_h=cfg.lane_raster_h,
+            raster_w=cfg.lane_raster_w,
+            raster_thickness=cfg.lane_raster_thickness,
+        )
         self.history = []
         self.best_scores = {"det": 0.0, "lane": 0.0, "joint": 0.0}
         self.save_dir = cfg.save_dir
+        self.start_epoch = 0
+        self.last_val_metrics: Optional[dict] = None
         os.makedirs(os.path.join(self.save_dir, "weights"), exist_ok=True)
+        if getattr(cfg, "auto_resume", True):
+            self._maybe_resume()
+
+    def _maybe_resume(self):
+        candidate_paths = []
+        resume_path = getattr(self.cfg, "resume_path", "")
+        if resume_path:
+            candidate_paths.append(resume_path)
+        candidate_paths.extend([
+            os.path.join(self.save_dir, "weights", "last.pt"),
+            os.path.join(self.save_dir, "weights", "best_joint.pt"),
+        ])
+        ckpt_path = next((p for p in candidate_paths if p and os.path.isfile(p)), None)
+        if ckpt_path is None:
+            return
+        ckpt = torch.load(ckpt_path, map_location=self.device)
+        try:
+            self.model.load_state_dict(ckpt["model_state_dict"], strict=True)
+        except Exception:
+            self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
+        if "optimizer_state_dict" in ckpt:
+            try:
+                self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            except Exception:
+                pass
+        if self.scaler is not None and "scaler_state_dict" in ckpt:
+            try:
+                self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+            except Exception:
+                pass
+        self.best_scores = ckpt.get("best_scores", self.best_scores)
+        self.start_epoch = int(ckpt.get("epoch", 0))
+        self.last_val_metrics = ckpt.get("metrics")
+        hist_path = os.path.join(self.save_dir, "history.csv")
+        if os.path.isfile(hist_path):
+            with open(hist_path, "r", newline="") as f:
+                reader = csv.DictReader(f)
+                self.history = [{k: self._parse_scalar(v) for k, v in row.items()} for row in reader]
+        print(f"Resumed from checkpoint: {ckpt_path} (next epoch={self.start_epoch + 1})")
+
+    @staticmethod
+    def _parse_scalar(v):
+        if isinstance(v, (int, float)):
+            return v
+        if v is None:
+            return v
+        s = str(v)
+        try:
+            if s.lower() in {"nan", "inf", "-inf"}:
+                return float(s)
+            if "." in s or "e" in s.lower():
+                return float(s)
+            return int(s)
+        except Exception:
+            return v
 
     def _get_lr(self, epoch: int) -> float:
         if epoch < self.cfg.warmup_epochs:
@@ -56,13 +117,23 @@ class Trainer:
         for pg in self.optimizer.param_groups:
             pg["lr"] = lr * self.cfg.backbone_lr_scale if pg.get("name") == "backbone" else lr
 
+    def _set_task_weights(self, epoch: int):
+        warm_epochs = max(int(getattr(self.cfg, "task_warmup_epochs", 0)), 0)
+        if epoch < warm_epochs:
+            self.criterion.det_weight = float(getattr(self.cfg, "det_task_warmup_weight", self.cfg.det_task_weight))
+            self.criterion.lane_weight = float(getattr(self.cfg, "lane_task_warmup_weight", self.cfg.lane_task_weight))
+        else:
+            self.criterion.det_weight = float(self.cfg.det_task_weight)
+            self.criterion.lane_weight = float(self.cfg.lane_task_weight)
+
     def train_epoch(self, epoch: int) -> Dict[str, float]:
         self.model.train()
+        self._set_task_weights(epoch)
         totals = {}
         n = 0
         for batch in self.train_loader:
             images = batch["images"].to(self.device, non_blocking=True)
-            batch_gpu = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            batch_gpu = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             self.optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=self.cfg.amp):
                 outputs = self.model(images)
@@ -81,24 +152,27 @@ class Trainer:
                 self.optimizer.step()
             for k, v in info.items():
                 totals[k] = totals.get(k, 0.0) + v
-            totals["loss"] = totals.get("loss", 0.0) + loss.item()
+            totals["loss"] = totals.get("loss", 0.0) + float(loss.item())
             n += 1
         return {k: v / max(n, 1) for k, v in totals.items()}
 
     @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
+    def validate(self, max_batches: Optional[int] = None) -> Dict[str, float]:
         self.model.eval()
         self.det_metrics.reset()
         self.lane_metrics.reset()
         val_loss_sum = 0.0
         n = 0
-        for batch in self.val_loader:
+        batch_limit = max_batches if max_batches is not None else int(getattr(self.cfg, "max_val_batches", 0) or 0)
+        for batch_idx, batch in enumerate(self.val_loader):
+            if batch_limit > 0 and batch_idx >= batch_limit:
+                break
             images = batch["images"].to(self.device, non_blocking=True)
-            batch_gpu = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            batch_gpu = {k: v.to(self.device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             with torch.amp.autocast("cuda", enabled=self.cfg.amp):
                 outputs = self.model(images)
                 loss, _ = self.criterion(outputs, batch_gpu)
-            val_loss_sum += loss.item()
+            val_loss_sum += float(loss.item())
             n += 1
             b = images.shape[0]
             pred_logits = outputs["det_pred_logits"]
@@ -122,19 +196,20 @@ class Trainer:
                     gt_xyxy = torch.empty((0, 4), device=self.device)
                     gt_cls = torch.empty(0, dtype=torch.long, device=self.device)
                 self.det_metrics.update(pred_xyxy, scores[keep], labels[keep], gt_xyxy, gt_cls)
-            if batch_gpu["has_lanes"].sum() > 0:
-                for bi in range(b):
-                    if batch_gpu["has_lanes"][bi] > 0.5:
-                        self.lane_metrics.update(
-                            outputs["lane_pred_points"][bi].detach().cpu(),
-                            outputs["lane_exist_logits"][bi].detach().cpu(),
-                            batch_gpu["lane_points"][bi].detach().cpu(),
-                            batch_gpu["lane_existence"][bi].detach().cpu(),
-                            batch_gpu["lane_visibility"][bi].detach().cpu(),
-                        )
+            has_lane_mask = batch_gpu["has_lanes"] > 0.5
+            if has_lane_mask.any():
+                for bi in torch.where(has_lane_mask)[0].tolist():
+                    self.lane_metrics.update(
+                        outputs["lane_pred_points"][bi].detach().cpu(),
+                        outputs["lane_exist_logits"][bi].detach().cpu(),
+                        batch_gpu["lane_points"][bi].detach().cpu(),
+                        batch_gpu["lane_existence"][bi].detach().cpu(),
+                        batch_gpu["lane_visibility"][bi].detach().cpu(),
+                    )
         results = {"val_loss": val_loss_sum / max(n, 1)}
         results.update(self.det_metrics.compute())
         results.update(self.lane_metrics.compute())
+        self.last_val_metrics = results
         return results
 
     def train(self) -> list:
@@ -147,48 +222,60 @@ class Trainer:
         print(f"{'='*65}")
         patience_counter = 0
         start = time.time()
-        for epoch in range(epochs):
+        val_interval = max(int(getattr(self.cfg, "val_interval", 1)), 1)
+        for epoch in range(self.start_epoch, epochs):
             self._set_lr(epoch)
             t0 = time.time()
             train_metrics = self.train_epoch(epoch)
-            val_metrics = self.validate()
+            do_val = ((epoch == self.start_epoch) or ((epoch + 1) % val_interval == 0) or (epoch + 1 == epochs))
+            if do_val:
+                val_metrics = self.validate()
+            else:
+                val_metrics = self.last_val_metrics or {"val_loss": float("nan"), "det_map50": 0.0, "lane_miou": 0.0, "lane_overlap_f1": 0.0}
             dt = time.time() - t0
-            record = {"epoch": epoch + 1, "time": dt, "lr": self.optimizer.param_groups[-1]["lr"]}
+            record = {
+                "epoch": epoch + 1,
+                "time": dt,
+                "lr": self.optimizer.param_groups[-1]["lr"],
+                "det_task_weight": self.criterion.det_weight,
+                "lane_task_weight": self.criterion.lane_weight,
+            }
             record.update({f"train_{k}": v for k, v in train_metrics.items()})
             record.update(val_metrics)
             self.history.append(record)
-            det_map = val_metrics.get("det_map50", 0)
-            lane_miou = val_metrics.get("lane_miou", 0)
-            lane_f1 = val_metrics.get("lane_overlap_f1", 0)
+            det_map = float(val_metrics.get("det_map50", 0) or 0)
+            lane_miou = float(val_metrics.get("lane_miou", 0) or 0)
+            lane_f1 = float(val_metrics.get("lane_overlap_f1", 0) or 0)
+            val_tag = f"val={val_metrics.get('val_loss', float('nan')):.3f}" if do_val else "val=skip"
             print(
-                f"Epoch {epoch+1:>3}/{epochs} | loss={train_metrics.get('loss', 0):.3f} | "
-                f"val={val_metrics.get('val_loss', 0):.3f} | mAP50={det_map*100:.1f}% | "
-                f"lane mIoU={lane_miou*100:.1f}% | lane overlapF1={lane_f1*100:.1f}% | {dt:.0f}s"
+                f"Epoch {epoch+1:>3}/{epochs} | loss={train_metrics.get('loss', 0):.3f} | {val_tag} | "
+                f"mAP50={det_map*100:.1f}% | lane mIoU={lane_miou*100:.1f}% | lane overlapF1={lane_f1*100:.1f}% | {dt:.0f}s"
             )
-            improved = False
-            if det_map > self.best_scores["det"]:
-                self.best_scores["det"] = det_map
-                self._save("best_det", epoch + 1, val_metrics)
-                improved = True
-            lane_score = lane_miou
-            if lane_score > self.best_scores["lane"]:
-                self.best_scores["lane"] = lane_score
-                self._save("best_lane", epoch + 1, val_metrics)
-                improved = True
-            joint = det_map * 0.6 + lane_score * 0.4
-            if joint > self.best_scores["joint"]:
-                self.best_scores["joint"] = joint
-                self._save("best_joint", epoch + 1, val_metrics)
-                improved = True
-            if improved:
-                patience_counter = 0
-            else:
-                patience_counter += 1
-                if patience_counter >= self.cfg.patience:
-                    print(f"Early stopping at epoch {epoch+1}")
-                    break
-        self._save("last", len(self.history), val_metrics)
-        self._save_history()
+            if do_val:
+                improved = False
+                if det_map > self.best_scores["det"]:
+                    self.best_scores["det"] = det_map
+                    self._save("best_det", epoch + 1, val_metrics)
+                    improved = True
+                lane_score = lane_miou
+                if lane_score > self.best_scores["lane"]:
+                    self.best_scores["lane"] = lane_score
+                    self._save("best_lane", epoch + 1, val_metrics)
+                    improved = True
+                joint = det_map * 0.6 + lane_score * 0.4
+                if joint > self.best_scores["joint"]:
+                    self.best_scores["joint"] = joint
+                    self._save("best_joint", epoch + 1, val_metrics)
+                    improved = True
+                if improved:
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= self.cfg.patience:
+                        print(f"Early stopping at epoch {epoch+1}")
+                        break
+            self._save("last", epoch + 1, val_metrics)
+            self._save_history()
         total_time = time.time() - start
         print(f"\n{'='*65}")
         print(f"  Training complete — {total_time/60:.1f} min")
@@ -200,7 +287,7 @@ class Trainer:
 
     def _save(self, name: str, epoch: int, metrics: dict):
         path = os.path.join(self.save_dir, "weights", f"{name}.pt")
-        torch.save({
+        payload = {
             "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -208,7 +295,10 @@ class Trainer:
             "best_scores": self.best_scores,
             "arch_config": self.model._arch_config,
             "config": self.cfg.to_dict(),
-        }, path)
+        }
+        if self.scaler is not None:
+            payload["scaler_state_dict"] = self.scaler.state_dict()
+        torch.save(payload, path)
 
     def _save_history(self):
         if not self.history:

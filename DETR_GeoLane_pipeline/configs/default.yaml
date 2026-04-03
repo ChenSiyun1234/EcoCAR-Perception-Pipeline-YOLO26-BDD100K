@@ -70,3 +70,15 @@ lane_match_thresh: 15.0
 
 # Training
 patience: 15
+
+# Data / resume / validation
+label_schema: auto
+auto_resume: true
+resume_path: ""
+val_interval: 2
+max_val_batches: 0
+
+# Task balancing warmup
+det_task_warmup_weight: 1.0
+lane_task_warmup_weight: 0.35
+task_warmup_epochs: 8

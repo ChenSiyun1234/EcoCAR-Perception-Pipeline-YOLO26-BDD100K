@@ -111,6 +111,14 @@ class Config:
     conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
+    label_schema: str = "auto"
+    auto_resume: bool = True
+    resume_path: str = ""
+    val_interval: int = 1
+    max_val_batches: int = 0
+    det_task_warmup_weight: float = 1.0
+    lane_task_warmup_weight: float = 0.35
+    task_warmup_epochs: int = 8
     save_dir: str = ""
     patience: int = 15
 
