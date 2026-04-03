@@ -104,6 +104,10 @@ class Config:
     lane_type_weight: float = 1.0
     det_task_weight: float = 1.0
     lane_task_weight: float = 1.0
+    lane_overlap_weight: float = 2.0
+    lane_raster_h: int = 72
+    lane_raster_w: int = 128
+    lane_raster_thickness: float = 0.03
     conf_thresh: float = 0.3
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0

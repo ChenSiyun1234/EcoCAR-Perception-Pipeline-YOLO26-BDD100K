@@ -57,6 +57,12 @@ lane_type_weight: 1.0
 det_task_weight: 1.0
 lane_task_weight: 1.0
 
+# Lane overlap supervision / evaluation
+lane_overlap_weight: 2.0
+lane_raster_h: 72
+lane_raster_w: 128
+lane_raster_thickness: 0.03
+
 # Evaluation
 conf_thresh: 0.3
 nms_iou: 0.5

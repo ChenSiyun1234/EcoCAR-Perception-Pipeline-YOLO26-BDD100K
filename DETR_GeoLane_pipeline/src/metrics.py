@@ -2,69 +2,15 @@
 Evaluation metrics for both tasks.
 
 Detection: mAP@50, mAP@50-95 using torchmetrics
-Lane: F1-score based on curve-to-curve geometric matching
+Lane: thick-polyline overlap metrics (mIoU / F1) plus legacy curve distance
 """
 
-import math
 import torch
-import numpy as np
-from typing import Dict, List
-
-
-def _segments_from_points(points: torch.Tensor):
-    if points.shape[0] < 2:
-        return points[:1], points[:1]
-    return points[:-1], points[1:]
-
-
-def point_to_polyline_distance(points: torch.Tensor, polyline: torch.Tensor) -> torch.Tensor:
-    if polyline.shape[0] == 0:
-        return torch.zeros(points.shape[0], device=points.device, dtype=points.dtype)
-    if polyline.shape[0] == 1:
-        return torch.norm(points - polyline[0], dim=-1)
-    a, b = _segments_from_points(polyline)
-    ab = b - a
-    ap = points[:, None, :] - a[None, :, :]
-    denom = (ab * ab).sum(dim=-1).clamp(min=1e-8)
-    t = (ap * ab[None, :, :]).sum(dim=-1) / denom[None, :]
-    t = t.clamp(0.0, 1.0)
-    proj = a[None, :, :] + t[..., None] * ab[None, :, :]
-    dist = torch.norm(points[:, None, :] - proj, dim=-1)
-    return dist.min(dim=1).values
-
-
-def resample_polyline(points: torch.Tensor, num: int) -> torch.Tensor:
-    if points.shape[0] == 0:
-        return torch.zeros(num, 2, device=points.device, dtype=points.dtype)
-    if points.shape[0] == 1:
-        return points.repeat(num, 1)
-    seg = torch.norm(points[1:] - points[:-1], dim=-1)
-    cum = torch.cat([torch.zeros(1, device=points.device, dtype=points.dtype), seg.cumsum(0)])
-    total = cum[-1]
-    if total < 1e-8:
-        return points[:1].repeat(num, 1)
-    t = torch.linspace(0.0, float(total.item()), num, device=points.device, dtype=points.dtype)
-    idx = torch.searchsorted(cum, t, right=True) - 1
-    idx = idx.clamp(min=0, max=points.shape[0] - 2)
-    left = points[idx]
-    right = points[idx + 1]
-    left_t = cum[idx]
-    right_t = cum[idx + 1]
-    alpha = ((t - left_t) / (right_t - left_t).clamp(min=1e-8)).unsqueeze(-1)
-    return left + alpha * (right - left)
-
-
-def curve_distance(pred_points: torch.Tensor, gt_points: torch.Tensor, resample_n: int = 96) -> torch.Tensor:
-    pred_rs = resample_polyline(pred_points, resample_n)
-    gt_rs = resample_polyline(gt_points, resample_n)
-    d1 = point_to_polyline_distance(pred_rs, gt_rs).mean()
-    d2 = point_to_polyline_distance(gt_rs, pred_rs).mean()
-    return 0.5 * (d1 + d2)
+from typing import Dict
+from .losses import aggregate_lane_mask, curve_to_curve_distance
 
 
 class DetectionMetrics:
-    """mAP computation using torchmetrics MeanAveragePrecision."""
-
     def __init__(self, num_classes: int = 5, device: str = "cpu"):
         self.num_classes = num_classes
         self.device = device
@@ -84,7 +30,6 @@ class DetectionMetrics:
     def update(self, pred_boxes: torch.Tensor, pred_scores: torch.Tensor,
                pred_labels: torch.Tensor, gt_boxes: torch.Tensor,
                gt_labels: torch.Tensor):
-        """Update with predictions and GT for one image."""
         if not self._has_tm:
             return
         dev = self.device
@@ -103,50 +48,55 @@ class DetectionMetrics:
         if not self._has_tm:
             return {"det_map50": 0.0, "det_map50_95": 0.0}
         result = self._map.compute()
-        safe = lambda x: max(0.0, float(x.item())) if torch.isfinite(x) else 0.0
-        return {
-            "det_map50": safe(result.get("map_50", torch.tensor(0.0))),
-            "det_map50_95": safe(result.get("map", torch.tensor(0.0))),
-        }
+        def safe(x):
+            return max(0.0, float(x.item())) if torch.isfinite(x) else 0.0
+        return {"det_map50": safe(result.get("map_50", torch.tensor(0.0))), "det_map50_95": safe(result.get("map", torch.tensor(0.0)))}
 
 
 class LaneMetrics:
-    """Lane evaluation based on curve-to-curve geometric matching.
+    def __init__(self, match_thresh_px: float = 15.0, img_size: int = 640,
+                 raster_h: int = 72, raster_w: int = 128, raster_thickness: float = 0.03):
+        self.match_thresh = match_thresh_px / img_size
+        self.raster_h = raster_h
+        self.raster_w = raster_w
+        self.raster_thickness = raster_thickness
+        self.reset()
 
-    A predicted lane is matched to a GT lane if the symmetric point-to-polyline
-    distance between the two piecewise-linear curves is below a threshold.
-    """
-
-    def __init__(self, match_thresh_px: float = 15.0, img_size: int = 640):
-        self.match_thresh = match_thresh_px / img_size  # normalized threshold
+    def reset(self):
         self.tp = 0
         self.fp = 0
         self.fn = 0
         self.chamfer_sum = 0.0
         self.chamfer_count = 0
-
-    def reset(self):
-        self.tp = self.fp = self.fn = 0
-        self.chamfer_sum = self.chamfer_count = 0
+        self.intersection = 0.0
+        self.union = 0.0
 
     @torch.no_grad()
     def update(self, pred_points: torch.Tensor, pred_exist: torch.Tensor,
                gt_points: torch.Tensor, gt_exist: torch.Tensor,
+               gt_visibility: torch.Tensor | None = None,
                exist_thresh: float = 0.5):
-        """Update for one image.
+        pred_mask_img = aggregate_lane_mask(
+            pred_points, pred_exist[:, 0], None,
+            height=self.raster_h, width=self.raster_w,
+            thickness=self.raster_thickness, exist_thresh=exist_thresh,
+            use_logits=True,
+        )
+        gt_mask_img = aggregate_lane_mask(
+            gt_points, gt_exist, gt_visibility,
+            height=self.raster_h, width=self.raster_w,
+            thickness=self.raster_thickness, exist_thresh=0.5,
+            use_logits=False,
+        )
+        pred_bin = pred_mask_img > 0.5
+        gt_bin = gt_mask_img > 0.5
+        self.intersection += float((pred_bin & gt_bin).sum().item())
+        self.union += float((pred_bin | gt_bin).sum().item())
 
-        Args:
-            pred_points: (Q, N, 2) normalized
-            pred_exist: (Q, 1) logits
-            gt_points: (max_lanes, N, 2) normalized
-            gt_exist: (max_lanes,) float
-        """
-        pred_mask = pred_exist[:, 0].sigmoid() > exist_thresh
-        gt_mask = gt_exist > 0.5
-
-        n_pred = pred_mask.sum().item()
-        n_gt = gt_mask.sum().item()
-
+        pred_keep = pred_exist[:, 0].sigmoid() > exist_thresh
+        gt_keep = gt_exist > 0.5
+        n_pred = int(pred_keep.sum().item())
+        n_gt = int(gt_keep.sum().item())
         if n_gt == 0 and n_pred == 0:
             return
         if n_gt == 0:
@@ -155,20 +105,16 @@ class LaneMetrics:
         if n_pred == 0:
             self.fn += n_gt
             return
-
-        pred_pts = pred_points[pred_mask]  # (n_pred, N, 2)
-        gt_pts = gt_points[gt_mask]        # (n_gt, N, 2)
-
-                # Distance matrix: curve-to-curve geometric distance
+        pred_pts = pred_points[pred_keep]
+        gt_pts = gt_points[gt_keep]
+        gt_vis = gt_visibility[gt_keep] if gt_visibility is not None else None
         dist = torch.zeros(n_pred, n_gt)
         for i in range(n_pred):
             for j in range(n_gt):
-                dist[i, j] = curve_distance(pred_pts[i], gt_pts[j])
-
-        # Greedy matching (simple, fast)
+                geom = curve_to_curve_distance(pred_pts[i], gt_pts[j], None, gt_vis[j] if gt_vis is not None else None, 64)
+                dist[i, j] = geom["sym_dist"]
         matched_pred = set()
         matched_gt = set()
-        # Sort all (pred, gt) pairs by distance
         flat = [(dist[i, j].item(), i, j) for i in range(n_pred) for j in range(n_gt)]
         flat.sort()
         for d, i, j in flat:
@@ -180,7 +126,6 @@ class LaneMetrics:
                 self.tp += 1
                 self.chamfer_sum += d
                 self.chamfer_count += 1
-
         self.fp += n_pred - len(matched_pred)
         self.fn += n_gt - len(matched_gt)
 
@@ -189,9 +134,13 @@ class LaneMetrics:
         rec = self.tp / max(self.tp + self.fn, 1)
         f1 = 2 * prec * rec / max(prec + rec, 1e-6)
         chamfer = self.chamfer_sum / max(self.chamfer_count, 1)
+        miou = self.intersection / max(self.union, 1.0)
+        overlap_f1 = 2.0 * self.intersection / max((self.intersection + self.union), 1.0)
         return {
             "lane_f1": f1,
             "lane_precision": prec,
             "lane_recall": rec,
             "lane_curve_dist": chamfer,
+            "lane_miou": miou,
+            "lane_overlap_f1": overlap_f1,
         }
