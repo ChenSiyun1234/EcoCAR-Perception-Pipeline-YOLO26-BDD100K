@@ -183,7 +183,11 @@ class Trainer:
                 probs = pred_logits[bi].softmax(dim=-1)
                 scores, labels = probs[:, :-1].max(dim=-1)
                 keep = scores > self.cfg.conf_thresh
-                pred_xyxy = box_cxcywh_to_xyxy(pred_boxes[bi, keep]) * self.cfg.img_size
+                keep_idx = torch.where(keep)[0]
+                if keep_idx.numel() > 150:
+                    topk = scores[keep_idx].topk(150).indices
+                    keep_idx = keep_idx[topk]
+                pred_xyxy = box_cxcywh_to_xyxy(pred_boxes[bi, keep_idx]) * self.cfg.img_size
                 if det_targets.shape[0] > 0:
                     mask = det_targets[:, 0] == bi
                     tgt = det_targets[mask]
@@ -196,7 +200,7 @@ class Trainer:
                 else:
                     gt_xyxy = torch.empty((0, 4), device=self.device)
                     gt_cls = torch.empty(0, dtype=torch.long, device=self.device)
-                self.det_metrics.update(pred_xyxy, scores[keep], labels[keep], gt_xyxy, gt_cls)
+                self.det_metrics.update(pred_xyxy, scores[keep_idx], labels[keep_idx], gt_xyxy, gt_cls)
             has_lane_mask = batch_gpu['has_lanes'] > 0.5
             if has_lane_mask.any():
                 for bi in torch.where(has_lane_mask)[0].tolist():

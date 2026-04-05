@@ -432,6 +432,7 @@ class DetectionLoss(nn.Module):
             giou = generalized_box_iou(box_cxcywh_to_xyxy(pred_boxes[bi]), box_cxcywh_to_xyxy(gt_box_i))
             giou_cost = -giou
             cost = self.cls_weight * cls_cost + self.l1_weight * l1_cost + self.giou_weight * giou_cost
+            cost = torch.nan_to_num(cost, nan=1e6, posinf=1e6, neginf=1e6)
             pred_idx, gt_idx = linear_sum_assignment(cost.detach().cpu().numpy())
             matches.append((pred_idx.tolist(), gt_idx.tolist()))
         return matches
@@ -570,6 +571,7 @@ class LaneLoss(nn.Module):
             cost = geom['sym_dist'] + 0.35 * geom['tan'] + 0.20 * geom['curvature'] + 0.75 * overlap_cost
             exist_prob = pred_exist[bi, :, 0].sigmoid()
             cost = cost - 0.25 * exist_prob.unsqueeze(1)
+            cost = torch.nan_to_num(cost, nan=1e6, posinf=1e6, neginf=1e6)
 
             pi, gi = linear_sum_assignment(cost.detach().cpu().numpy())
             matches.append((pi.tolist(), gt_indices[gi].tolist()))
@@ -581,10 +583,12 @@ class LaneLoss(nn.Module):
                      gt_visibility: torch.Tensor,
                      gt_lane_type: torch.Tensor,
                      has_lanes: torch.Tensor) -> Tuple[torch.Tensor, dict]:
-        pred_exist = outputs['lane_exist_logits']
-        pred_pts = outputs['lane_pred_points']
-        pred_type = outputs['lane_type_logits']
+        pred_exist = torch.nan_to_num(outputs['lane_exist_logits'], nan=0.0, posinf=20.0, neginf=-20.0)
+        pred_pts = torch.nan_to_num(outputs['lane_pred_points'], nan=0.5, posinf=1.0, neginf=0.0).clamp(0.0, 1.0)
+        pred_type = torch.nan_to_num(outputs['lane_type_logits'], nan=0.0, posinf=20.0, neginf=-20.0)
         pred_vis = outputs.get('lane_vis_logits')
+        if pred_vis is not None:
+            pred_vis = torch.nan_to_num(pred_vis, nan=0.0, posinf=20.0, neginf=-20.0)
         b, q = pred_exist.shape[:2]
         device = pred_exist.device
         lane_mask = has_lanes > 0.5

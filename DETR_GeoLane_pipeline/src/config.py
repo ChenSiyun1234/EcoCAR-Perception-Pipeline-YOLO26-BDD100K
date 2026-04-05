@@ -67,7 +67,7 @@ class Config:
     dataset_root: str = LOCAL_DATASET
     img_size: int = 640
     batch_size: int = 8
-    num_workers: int = 4
+    num_workers: int = 8
     max_lanes: int = 10
     lane_points: int = 72
     use_expanded_classes: bool = False
@@ -122,14 +122,14 @@ class Config:
     seg_mask_dim: int = 32
     seg_hidden_dim: int = 128
     seg_mask_weight: float = 1.0
-    conf_thresh: float = 0.3
+    conf_thresh: float = 0.4
     nms_iou: float = 0.5
     lane_match_thresh: float = 15.0
     label_schema: str = "auto"
     auto_resume: bool = True
     resume_path: str = ""
-    val_interval: int = 1
-    max_val_batches: int = 0
+    val_interval: int = 5
+    max_val_batches: int = 250
     det_task_warmup_weight: float = 1.0
     lane_task_warmup_weight: float = 0.35
     task_warmup_epochs: int = 8

@@ -111,7 +111,7 @@ class LaneMetrics:
         dist = torch.zeros(n_pred, n_gt)
         for i in range(n_pred):
             for j in range(n_gt):
-                geom = curve_to_curve_distance(pred_pts[i], gt_pts[j], None, gt_vis[j] if gt_vis is not None else None, 64)
+                geom = curve_to_curve_distance(pred_pts[i], gt_pts[j], None, gt_vis[j] if gt_vis is not None else None, 48)
                 dist[i, j] = geom["sym_dist"]
         matched_pred = set()
         matched_gt = set()
