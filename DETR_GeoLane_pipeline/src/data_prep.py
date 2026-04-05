@@ -90,7 +90,7 @@ def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
         if _classify_json_by_content(p) == "detection":
             det_jsons.append(p)
 
-    if not det_sources:
+    if not det_jsons:
         raise FileNotFoundError(f"No detection-style JSONs found under {raw_root}")
 
     train_candidates = [p for p in det_jsons if "train" in _norm_path_str(p)]
@@ -113,42 +113,21 @@ def locate_detection_jsons(raw_root: str | Path) -> Tuple[Path, Path]:
 
     if train_json == val_json:
         raise FileNotFoundError(
-            "Found detection sources but could not distinguish train and val. "
-            f"Candidates: {[str(p) for p in det_sources[:10]]}"
+            "Found detection JSONs but could not distinguish train and val. "
+            f"Candidates: {[str(p) for p in det_jsons[:10]]}"
         )
     return train_json, val_json
 
 
 def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
     raw_root = Path(raw_root)
-<<<<<<< HEAD
     train_dir: Optional[Path] = None
     val_dir: Optional[Path] = None
-=======
->>>>>>> parent of 54bd810 (Update data_prep.py)
 
-    preferred_train = [
-        raw_root / "bdd100k" / "images" / "100k" / "train",
-        raw_root / "images" / "100k" / "train",
-        raw_root / "100k" / "train",
-    ]
-    preferred_val = [
-        raw_root / "bdd100k" / "images" / "100k" / "val",
-        raw_root / "images" / "100k" / "val",
-        raw_root / "100k" / "val",
-    ]
-    train_dir = next((p for p in preferred_train if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
-    val_dir = next((p for p in preferred_val if p.is_dir() and any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())), None)
-    if train_dir and val_dir:
-        return train_dir, val_dir
-
-    train_dir = None
-    val_dir = None
     for p in raw_root.rglob("*"):
         if not p.is_dir():
             continue
         s = _norm_path_str(p)
-<<<<<<< HEAD
         if train_dir is None and s.endswith("/train") and "/images/" in s and ("100k" in s or "10k" in s):
             train_dir = p
         if val_dir is None and s.endswith("/val") and "/images/" in s and ("100k" in s or "10k" in s):
@@ -165,17 +144,6 @@ def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
                 val_dir = p
 
     if train_dir is None or val_dir is None:
-=======
-        has_images = any(x.suffix.lower() in IMAGE_SUFFIXES for x in p.iterdir() if x.is_file())
-        if not has_images:
-            continue
-        if train_dir is None and s.endswith("/train") and ("/images/" in s or "/100k/train" in s):
-            train_dir = p
-        if val_dir is None and s.endswith("/val") and ("/images/" in s or "/100k/val" in s):
-            val_dir = p
-
-    if train_dir is None or val_dir is None:
->>>>>>> parent of 54bd810 (Update data_prep.py)
         raise FileNotFoundError(f"Could not locate image train/val directories under {raw_root}")
 
     return train_dir, val_dir
@@ -183,12 +151,6 @@ def locate_image_dirs(raw_root: str | Path) -> Tuple[Path, Path]:
 
 def locate_lane_json(raw_root: str | Path) -> Optional[Path]:
     raw_root = Path(raw_root)
-<<<<<<< HEAD
-=======
-    for p in [raw_root / "100k" / "train", raw_root / "bdd100k" / "100k" / "train"]:
-        if p.is_dir():
-            return p
->>>>>>> parent of 54bd810 (Update data_prep.py)
     candidates: List[Path] = []
     for p in raw_root.rglob("*.json"):
         s = _norm_path_str(p)
@@ -389,51 +351,4 @@ def rebuild_dualpath_dataset(
         "val_counts": val_counts,
         "yaml_path": str(yaml_path),
         "paths_config": str(paths_cfg),
-    }
-
-
-def package_dataset_to_tar(dataset_root: str | Path, tar_path: str | Path, dereference: bool = True) -> Path:
-    dataset_root = Path(dataset_root)
-    tar_path = Path(tar_path)
-    tar_path.parent.mkdir(parents=True, exist_ok=True)
-    if tar_path.exists():
-        tar_path.unlink()
-    with tarfile.open(tar_path, "w") as tar:
-        tar.add(dataset_root, arcname=dataset_root.name, recursive=True, filter=None) if not dereference else None
-    return tar_path
-
-
-def package_dataset_to_tar(dataset_root: str | Path, tar_path: str | Path, dereference: bool = True) -> Path:
-    dataset_root = Path(dataset_root)
-    tar_path = Path(tar_path)
-    tar_path.parent.mkdir(parents=True, exist_ok=True)
-    if tar_path.exists():
-        tar_path.unlink()
-    with tarfile.open(tar_path, "w") as tar:
-        # dereference=True ensures linked/copied images become real files inside the archive
-        tar.dereference = dereference
-        tar.add(dataset_root, arcname=dataset_root.name)
-    return tar_path
-
-
-def persist_dataset_artifacts(local_dataset_root: str | Path, drive_datasets_dir: str | Path, archive_name: Optional[str] = None) -> Dict[str, str]:
-    local_dataset_root = Path(local_dataset_root)
-    drive_datasets_dir = ensure_dir(drive_datasets_dir)
-    drive_dataset_root = ensure_dir(drive_datasets_dir / local_dataset_root.name)
-
-    copied = []
-    for name in ["bdd100k_vehicle5.yaml", "paths_config.yaml"]:
-        src = local_dataset_root / name
-        if src.exists():
-            shutil.copy2(src, drive_dataset_root / name)
-            copied.append(str(drive_dataset_root / name))
-
-    archive_name = archive_name or f"{local_dataset_root.name}_nb02.tar"
-    archive_path = drive_datasets_dir / archive_name
-    package_dataset_to_tar(local_dataset_root, archive_path, dereference=True)
-
-    return {
-        "drive_dataset_root": str(drive_dataset_root),
-        "archive_path": str(archive_path),
-        "copied_files": copied,
     }
