@@ -728,3 +728,7 @@ print(f"{'='*55}")""")
 if __name__ == '__main__':
     create_nb00()
     create_nb01()
+
+
+# Note: notebook 02_rebuild_dataset_from_raw_zips.ipynb is maintained as a checked-in notebook
+# because it is shorter to edit directly than to synthesize here.
