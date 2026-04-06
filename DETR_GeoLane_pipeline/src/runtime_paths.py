@@ -1,18 +1,39 @@
 import os
 import shutil
 import tarfile
-from typing import Optional
-
-
-def _candidate_dataset_roots(local_base: str, dataset_name: str):
-    return [
-        local_base,
-        os.path.join(local_base, dataset_name),
-    ]
+from typing import Optional, List
 
 
 def _has_dataset_layout(root: str) -> bool:
     return os.path.isdir(os.path.join(root, 'images', 'train')) and os.path.isdir(os.path.join(root, 'labels', 'train'))
+
+
+def _find_dataset_roots(search_roots: List[str], max_depth: int = 4) -> List[str]:
+    found = []
+    seen = set()
+    for base in search_roots:
+        if not os.path.isdir(base):
+            continue
+        base = os.path.abspath(base)
+        for cur, dirs, files in os.walk(base):
+            rel = os.path.relpath(cur, base)
+            depth = 0 if rel == '.' else rel.count(os.sep) + 1
+            if depth > max_depth:
+                dirs[:] = []
+                continue
+            if _has_dataset_layout(cur):
+                if cur not in seen:
+                    found.append(cur)
+                    seen.add(cur)
+    found.sort(key=lambda p: (p.count(os.sep), len(p)))
+    return found
+
+
+def _sync_paths_config(dataset_root: str, global_paths_cfg: str) -> None:
+    local_paths_cfg = os.path.join(dataset_root, 'paths_config.yaml')
+    if os.path.isfile(local_paths_cfg):
+        shutil.copy2(local_paths_cfg, global_paths_cfg)
+        print(f'Synced paths_config -> {global_paths_cfg}')
 
 
 def ensure_local_dataset_from_drive(
@@ -38,35 +59,36 @@ def ensure_local_dataset_from_drive(
 
     os.makedirs(local_base, exist_ok=True)
 
-    for cand in _candidate_dataset_roots(local_base, dataset_name):
-        if _has_dataset_layout(cand):
-            local_paths_cfg = os.path.join(cand, 'paths_config.yaml')
-            if os.path.isfile(local_paths_cfg):
-                shutil.copy2(local_paths_cfg, global_paths_cfg)
-            return cand
+    search_roots = [local_base, os.path.join(local_base, dataset_name), '/content']
+    existing = _find_dataset_roots(search_roots)
+    if existing:
+        root = existing[0]
+        _sync_paths_config(root, global_paths_cfg)
+        print(f'Notebook-local dataset root: {root}')
+        return root
 
     if os.path.isfile(dataset_tar):
         print(f'Extracting {dataset_tar} into this notebook runtime ...')
         with tarfile.open(dataset_tar, 'r') as tar:
             tar.extractall('/content', filter='data')
         print('Done.')
-    elif os.path.isdir(os.path.join(dataset_drive, 'images')):
+    elif _has_dataset_layout(dataset_drive):
         print(f'Using Drive dataset directory directly: {dataset_drive}')
         return dataset_drive
     else:
         raise FileNotFoundError(
-            f'Dataset not found on Drive. Expected {dataset_tar} or {dataset_drive}'
+            f'Dataset not found on Drive. Expected {dataset_tar} or a valid dataset dir at {dataset_drive}'
         )
 
-    for cand in _candidate_dataset_roots(local_base, dataset_name):
-        if _has_dataset_layout(cand):
-            local_paths_cfg = os.path.join(cand, 'paths_config.yaml')
-            if os.path.isfile(local_paths_cfg):
-                shutil.copy2(local_paths_cfg, global_paths_cfg)
-                print(f'Synced paths_config -> {global_paths_cfg}')
-            return cand
+    found = _find_dataset_roots(search_roots)
+    if found:
+        root = found[0]
+        _sync_paths_config(root, global_paths_cfg)
+        print(f'Notebook-local dataset root: {root}')
+        return root
 
     raise FileNotFoundError(
         'Dataset archive extracted, but no valid dataset root was found. '
-        f'Checked: {_candidate_dataset_roots(local_base, dataset_name)}'
+        f'Searched under: {search_roots}. '
+        'Expected a directory containing images/train and labels/train.'
     )
