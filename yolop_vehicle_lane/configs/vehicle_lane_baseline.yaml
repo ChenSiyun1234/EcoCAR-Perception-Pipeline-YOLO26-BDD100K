@@ -41,9 +41,12 @@ LOSS:
   LL_IOU_GAIN: 0.2
 
 DATASET:
+  ROOT: '/content/bdd100k_vehicle5'
   DATAROOT: '/content/bdd100k/images/100k'
   LABELROOT: '/content/bdd100k/labels/100k'
   LANEROOT: '/content/bdd100k/lane_masks'
+  LANE_DIR_CANDIDATES: ['masks', 'lane_masks']
+  LABEL_FORMAT: 'auto'
   LANE_JSON_TRAIN: ''
   LANE_JSON_VAL: ''
   DATASET: 'BddDataset'

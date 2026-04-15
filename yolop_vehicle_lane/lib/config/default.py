@@ -56,13 +56,16 @@ _C.LOSS.LL_IOU_GAIN = 0.2   # lane line IoU loss gain
 _C.DATASET = CN(new_allowed=True)
 _C.DATASET.DATAROOT = '/content/bdd100k/images/100k'
 _C.DATASET.LABELROOT = '/content/bdd100k/labels/100k'
-_C.DATASET.LANEROOT = '/content/bdd100k/lane_masks'  # pre-rendered lane masks
+_C.DATASET.LANEROOT = '/content/bdd100k/lane_masks'  # pre-rendered lane masks or packaged dataset root
+_C.DATASET.LANE_DIR_CANDIDATES = ['masks', 'lane_masks']
+_C.DATASET.LABEL_FORMAT = 'auto'  # auto|txt|json
 _C.DATASET.LANE_JSON_TRAIN = ''  # path to BDD100K lane label JSON for train
 _C.DATASET.LANE_JSON_VAL = ''    # path to BDD100K lane label JSON for val
 _C.DATASET.DATASET = 'BddDataset'
 _C.DATASET.TRAIN_SET = 'train'
 _C.DATASET.TEST_SET = 'val'
 _C.DATASET.DATA_FORMAT = 'jpg'
+_C.DATASET.ROOT = ''  # optional packaged dataset root, e.g. /content/bdd100k_vehicle5
 _C.DATASET.SELECT_DATA = False
 _C.DATASET.ORG_IMG_SIZE = [720, 1280]
 
