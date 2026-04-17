@@ -26,12 +26,13 @@ _C.CUDNN.ENABLED = True
 # Google Drive persistence (Colab)
 _C.DRIVE = CN()
 _C.DRIVE.ROOT = '/content/drive/MyDrive/EcoCAR'
-_C.DRIVE.CHECKPOINT_DIR = '/content/drive/MyDrive/EcoCAR/checkpoints'
-_C.DRIVE.METRICS_DIR = '/content/drive/MyDrive/EcoCAR/metrics'
+_C.DRIVE.CHECKPOINT_DIR = '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints'
+_C.DRIVE.METRICS_DIR = '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics'
 
 # common params for NETWORK
 _C.MODEL = CN(new_allowed=True)
-_C.MODEL.NAME = 'VehicleLane'
+# MODEL.NAME selects the baseline: 'YOLOP' or 'YOLOPv2'. See lib/models/__init__.py.
+_C.MODEL.NAME = 'YOLOPv2'
 _C.MODEL.NC = 5  # number of detection classes (vehicle-only)
 _C.MODEL.VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
 _C.MODEL.PRETRAINED = ""
@@ -79,6 +80,15 @@ _C.DATASET.COLOR_RGB = False
 _C.DATASET.HSV_H = 0.015
 _C.DATASET.HSV_S = 0.7
 _C.DATASET.HSV_V = 0.4
+
+# Mosaic + MixUp augmentation gates.
+# [INFERRED] YOLOPv2 does not publish training code; these are YOLOv7
+# defaults that YOLOPv2 inherits by lineage. Keep OFF for a faithful
+# YOLOP baseline; turn ON for the YOLOPv2-style baseline.
+_C.DATASET.MOSAIC = False
+_C.DATASET.MOSAIC_PROB = 1.0
+_C.DATASET.MIXUP = False
+_C.DATASET.MIXUP_PROB = 0.15
 
 # train (no DRIVABLE_ONLY, SEG_ONLY, ENC_SEG_ONLY)
 _C.TRAIN = CN(new_allowed=True)

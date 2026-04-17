@@ -208,3 +208,96 @@ def _box_candidates(box1, box2, wh_thr=2, ar_thr=20, area_thr=0.1):
     w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
     ar = np.maximum(w2 / (h2 + 1e-16), h2 / (w2 + 1e-16))
     return (w2 > wh_thr) & (h2 > wh_thr) & (w2 * h2 / (w1 * h1 + 1e-16) > area_thr) & (ar < ar_thr)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Mosaic + MixUp for YOLOPv2-style training.
+# [INFERRED] YOLOPv2 does not publish training code. Mosaic and MixUp are
+# YOLOv7's default recipe (ultralytics style) and YOLOPv2 inherits its
+# lineage from YOLOv7 backbone. The parameters below mirror YOLOv7's
+# hyp.scratch.yaml defaults.
+#
+# Both helpers operate on a 2-tuple (img, lane_mask); labels are in the
+# pre-normalization xyxy pixel format used by AutoDriveDataset just
+# before the `labels[:, 1:5] = xyxy2xywh(...)` line.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def load_mosaic(dataset, index, s=640):
+    """Build a 4-image mosaic centered at a random pivot inside a 2s x 2s
+    canvas, then sample back to s x s via random_perspective with a
+    negative border (standard YOLOv5/YOLOv7 recipe).
+
+    Args:
+        dataset: AutoDriveDataset-like object exposing
+                 `_load_mosaic_sample(idx)` that returns
+                 (img_rgb, lane_mask, labels_xyxy_abs).
+        index:   base index for the first tile.
+        s:       target mosaic size (before final perspective).
+    Returns:
+        (img_out, lane_out), labels_out
+    """
+    labels4 = []
+    yc, xc = [int(random.uniform(s * 0.5, s * 1.5)) for _ in range(2)]
+    indices = [index] + random.choices(range(len(dataset)), k=3)
+
+    img4 = np.full((s * 2, s * 2, 3), 114, dtype=np.uint8)
+    lane4 = np.zeros((s * 2, s * 2), dtype=np.uint8)
+
+    for i, idx in enumerate(indices):
+        img, lane, labels = dataset._load_mosaic_sample(idx)
+        h, w = img.shape[:2]
+        r = s / max(h, w)
+        if r != 1:
+            interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
+            img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=interp)
+            lane = cv2.resize(lane, (int(w * r), int(h * r)), interpolation=interp)
+            if labels.size:
+                labels = labels.copy()
+                labels[:, 1:5] *= r
+        h, w = img.shape[:2]
+
+        if i == 0:  # top-left
+            x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+            x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+        elif i == 1:  # top-right
+            x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+            x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+        elif i == 2:  # bottom-left
+            x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
+            x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+        else:  # bottom-right
+            x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
+            x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+
+        img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]
+        lane4[y1a:y2a, x1a:x2a] = lane[y1b:y2b, x1b:x2b]
+        padw, padh = x1a - x1b, y1a - y1b
+
+        if labels.size:
+            lab = labels.copy()
+            lab[:, 1] = labels[:, 1] + padw
+            lab[:, 2] = labels[:, 2] + padh
+            lab[:, 3] = labels[:, 3] + padw
+            lab[:, 4] = labels[:, 4] + padh
+            labels4.append(lab)
+
+    labels4 = np.concatenate(labels4, 0) if labels4 else np.zeros((0, 5), dtype=np.float32)
+    # Clip to canvas before the affine warp consumes the 2s canvas.
+    if labels4.size:
+        np.clip(labels4[:, 1::2], 0, 2 * s, out=labels4[:, 1::2])
+        np.clip(labels4[:, 2::2], 0, 2 * s, out=labels4[:, 2::2])
+    return (img4, lane4), labels4
+
+
+def mixup(img1, lane1, labels1, img2, lane2, labels2, alpha=8.0, beta=8.0):
+    """Beta-weighted image blend; labels are concatenated.
+    [INFERRED] parameters (alpha=beta=8.0) taken from YOLOv7 default.
+    Lane masks are combined by logical OR since both are binary foreground.
+    """
+    r = np.random.beta(alpha, beta)
+    img = (img1.astype(np.float32) * r + img2.astype(np.float32) * (1 - r)).astype(img1.dtype)
+    lane = np.maximum(lane1, lane2)  # foreground OR
+    labels = np.concatenate([labels1, labels2], 0) if (labels1.size and labels2.size) \
+             else (labels1 if labels1.size else labels2)
+    return img, lane, labels

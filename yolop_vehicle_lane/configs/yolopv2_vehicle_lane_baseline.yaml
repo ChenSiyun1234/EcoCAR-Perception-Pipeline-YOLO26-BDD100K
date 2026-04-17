@@ -1,6 +1,8 @@
-# Vehicle + Lane Detection Baseline Configuration
-# YOLOP-style shared encoder + detection PAN + lane seg decoder
-# 5 vehicle classes: car, truck, bus, motorcycle, bicycle
+# Phase-1 YOLOPv2-style Vehicle + Lane baseline.
+# Architecture: ELAN backbone + SPPCSPC + PAN neck + transpose-conv lane decoder.
+# [INFERRED] components are marked in lib/models/yolopv2_baseline.py.
+#
+# Use this yaml to run the repaired YOLOPv2-style baseline.
 
 GPUS: (0,)
 WORKERS: 4
@@ -15,21 +17,20 @@ CUDNN:
   DETERMINISTIC: false
   ENABLED: true
 
-# Google Drive persistence for Colab
 DRIVE:
   ROOT: '/content/drive/MyDrive/EcoCAR'
-  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/checkpoints'
-  METRICS_DIR: '/content/drive/MyDrive/EcoCAR/metrics'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolopv2'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolopv2'
 
 MODEL:
-  NAME: 'VehicleLane'
+  NAME: 'YOLOPv2'
   NC: 5
   VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
   PRETRAINED: ''
   IMAGE_SIZE: [640, 640]
 
 LOSS:
-  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]  # [cls, obj, iou, ll_seg, ll_iou]
+  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]
   FL_GAMMA: 0.0
   CLS_POS_WEIGHT: 1.0
   OBJ_POS_WEIGHT: 1.0
@@ -41,29 +42,25 @@ LOSS:
   LL_IOU_GAIN: 0.2
 
 DATASET:
-  ROOT: '/content/bdd100k_vehicle5'
-  DATAROOT: '/content/bdd100k/images/100k'
-  LABELROOT: '/content/bdd100k/labels/100k'
-  LANEROOT: '/content/bdd100k/lane_masks'
-  LANE_DIR_CANDIDATES: ['masks', 'lane_masks']
-  LABEL_FORMAT: 'auto'
-  LANE_JSON_TRAIN: ''
-  LANE_JSON_VAL: ''
   DATASET: 'BddDataset'
   TRAIN_SET: 'train'
   TEST_SET: 'val'
   DATA_FORMAT: 'jpg'
-  SELECT_DATA: false
   ORG_IMG_SIZE: [720, 1280]
   FLIP: true
-  SCALE_FACTOR: 0.25
-  ROT_FACTOR: 10
-  TRANSLATE: 0.1
+  SCALE_FACTOR: 0.5          # mosaic-friendly (YOLOv7 default)
+  ROT_FACTOR: 0              # YOLOv7 rotates via random_perspective after mosaic
+  TRANSLATE: 0.2             # YOLOv7 default
   SHEAR: 0.0
   COLOR_RGB: false
   HSV_H: 0.015
   HSV_S: 0.7
   HSV_V: 0.4
+  # Mosaic + MixUp ON for the YOLOPv2-style baseline [INFERRED: YOLOv7 recipe]
+  MOSAIC: true
+  MOSAIC_PROB: 1.0
+  MIXUP: true
+  MIXUP_PROB: 0.15
 
 TRAIN:
   LR0: 0.001
@@ -71,7 +68,7 @@ TRAIN:
   WARMUP_EPOCHS: 3.0
   WARMUP_BIASE_LR: 0.1
   WARMUP_MOMENTUM: 0.8
-  OPTIMIZER: 'adam'
+  OPTIMIZER: 'adam'          # keep Adam to match YOLOP baseline; [INFERRED]
   MOMENTUM: 0.937
   WD: 0.0005
   NESTEROV: true

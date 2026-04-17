@@ -1,0 +1,92 @@
+# Phase-1 YOLOP-style Vehicle + Lane baseline (honest label).
+# Architecture: YOLOP MCnet_0 minus the drivable-area decoder, detect nc=5.
+# No mosaic / mixup — matches the upstream YOLOP recipe.
+
+GPUS: (0,)
+WORKERS: 4
+PIN_MEMORY: true
+PRINT_FREQ: 20
+AUTO_RESUME: true
+NEED_AUTOANCHOR: false
+DEBUG: false
+
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+
+DRIVE:
+  ROOT: '/content/drive/MyDrive/EcoCAR'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolop'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolop'
+
+MODEL:
+  NAME: 'YOLOP'
+  NC: 5
+  VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+  PRETRAINED: ''
+  IMAGE_SIZE: [640, 640]
+
+LOSS:
+  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]
+  FL_GAMMA: 0.0
+  CLS_POS_WEIGHT: 1.0
+  OBJ_POS_WEIGHT: 1.0
+  SEG_POS_WEIGHT: 1.0
+  BOX_GAIN: 0.05
+  CLS_GAIN: 0.5
+  OBJ_GAIN: 1.0
+  LL_SEG_GAIN: 1.0
+  LL_IOU_GAIN: 0.2
+
+DATASET:
+  DATASET: 'BddDataset'
+  TRAIN_SET: 'train'
+  TEST_SET: 'val'
+  DATA_FORMAT: 'jpg'
+  ORG_IMG_SIZE: [720, 1280]
+  FLIP: true
+  SCALE_FACTOR: 0.25
+  ROT_FACTOR: 10
+  TRANSLATE: 0.1
+  SHEAR: 0.0
+  COLOR_RGB: false
+  HSV_H: 0.015
+  HSV_S: 0.7
+  HSV_V: 0.4
+  # No mosaic/mixup for the YOLOP baseline (upstream recipe).
+  MOSAIC: false
+  MIXUP: false
+
+TRAIN:
+  LR0: 0.001
+  LRF: 0.2
+  WARMUP_EPOCHS: 3.0
+  WARMUP_BIASE_LR: 0.1
+  WARMUP_MOMENTUM: 0.8
+  OPTIMIZER: 'adam'
+  MOMENTUM: 0.937
+  WD: 0.0005
+  NESTEROV: true
+  GAMMA1: 0.99
+  GAMMA2: 0.0
+  BEGIN_EPOCH: 0
+  END_EPOCH: 100
+  VAL_FREQ: 1
+  BATCH_SIZE_PER_GPU: 16
+  SHUFFLE: true
+  IOU_THRESHOLD: 0.2
+  ANCHOR_THRESHOLD: 4.0
+  DET_ONLY: false
+  LANE_ONLY: false
+  ENC_DET_ONLY: false
+  PLOT: true
+
+TEST:
+  BATCH_SIZE_PER_GPU: 24
+  MODEL_FILE: ''
+  SAVE_JSON: false
+  SAVE_TXT: false
+  PLOTS: true
+  NMS_CONF_THRESHOLD: 0.001
+  NMS_IOU_THRESHOLD: 0.6

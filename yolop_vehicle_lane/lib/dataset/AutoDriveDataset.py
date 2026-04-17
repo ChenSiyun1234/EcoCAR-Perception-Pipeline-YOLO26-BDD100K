@@ -24,7 +24,7 @@ import torch
 import torchvision.transforms as transforms
 from pathlib import Path
 from torch.utils.data import Dataset
-from ..utils import letterbox, augment_hsv, random_perspective, xyxy2xywh
+from ..utils import letterbox, augment_hsv, random_perspective, xyxy2xywh, load_mosaic, mixup
 
 
 class AutoDriveDataset(Dataset):
@@ -153,74 +153,155 @@ class AutoDriveDataset(Dataset):
     def __len__(self):
         return len(self.db)
 
-    def __getitem__(self, idx):
+    # ── Helpers for Mosaic (YOLOv7-derived) ────────────────────────────
+    def _load_mosaic_sample(self, idx):
+        """Load one sample for mosaic: returns (img_rgb, lane_mask, labels_xyxy_abs).
+        Labels are in pixel-absolute xyxy format in the source image's own
+        coordinate frame (no letterbox applied here)."""
         data = self.db[idx]
         img = cv2.imread(data["image"], cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
         if img is None:
             raise FileNotFoundError(f"Failed to read image: {data['image']}")
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        lane_label = cv2.imread(data["lane"], 0)
-        if lane_label is None:
+        lane = cv2.imread(data["lane"], 0)
+        if lane is None:
             raise FileNotFoundError(f"Failed to read lane mask: {data['lane']}")
+        h, w = img.shape[:2]
+        det = data["label"]
+        if det.size > 0:
+            labels = det.copy()
+            # det in normalized xywh → absolute xyxy
+            labels[:, 1] = w * (det[:, 1] - det[:, 3] / 2)
+            labels[:, 2] = h * (det[:, 2] - det[:, 4] / 2)
+            labels[:, 3] = w * (det[:, 1] + det[:, 3] / 2)
+            labels[:, 4] = h * (det[:, 2] + det[:, 4] / 2)
+        else:
+            labels = np.zeros((0, 5), dtype=np.float32)
+        return img, lane, labels
+
+    def __getitem__(self, idx):
+        """Training-time pipeline depends on cfg flags:
+          * Mosaic (DATASET.MOSAIC) gates on with prob p, composes a 4-tile
+            image, then runs random_perspective with negative border — the
+            standard YOLOv5/YOLOv7 recipe.
+          * MixUp (DATASET.MIXUP) blends two mosaic-warped samples.
+          * Both flags default False to keep parity with YOLOP's original
+            recipe. Switch them on in the YOLOPv2-style YAML.
+        [INFERRED] YOLOPv2 training code is not public. Mosaic/MixUp
+        follow YOLOv7 conventions which YOLOPv2 inherits its backbone
+        from.
+        """
+        use_mosaic = bool(self.is_train and getattr(self.cfg.DATASET, 'MOSAIC', False)
+                          and random.random() < getattr(self.cfg.DATASET, 'MOSAIC_PROB', 1.0))
+        use_mixup = bool(self.is_train and getattr(self.cfg.DATASET, 'MIXUP', False)
+                         and random.random() < getattr(self.cfg.DATASET, 'MIXUP_PROB', 0.15))
 
         resized_shape = self.inputsize
         if isinstance(resized_shape, list):
             resized_shape = max(resized_shape)
-        h0, w0 = img.shape[:2]
-        r = resized_shape / max(h0, w0)
-        if r != 1:
-            interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
-            img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
-            lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
-        h, w = img.shape[:2]
 
-        # Letterbox: 2-tuple (img, lane_label)
-        (img, lane_label), ratio, pad = letterbox((img, lane_label), resized_shape, auto=True, scaleup=self.is_train)
-        shapes = (h0, w0), ((h / h0, w / w0), pad)
-
-        det_label = data["label"]
-        labels = []
-
-        if det_label.size > 0:
-            labels = det_label.copy()
-            labels[:, 1] = ratio[0] * w * (det_label[:, 1] - det_label[:, 3] / 2) + pad[0]
-            labels[:, 2] = ratio[1] * h * (det_label[:, 2] - det_label[:, 4] / 2) + pad[1]
-            labels[:, 3] = ratio[0] * w * (det_label[:, 1] + det_label[:, 3] / 2) + pad[0]
-            labels[:, 4] = ratio[1] * h * (det_label[:, 2] + det_label[:, 4] / 2) + pad[1]
-
-        if self.is_train:
-            combination = (img, lane_label)
+        if use_mosaic:
+            (img, lane_label), labels = load_mosaic(self, idx, s=resized_shape)
+            # `random_perspective` with a negative border cuts the 2s canvas
+            # back down to s-x-s while also applying rotate/scale/shear.
+            border = (-resized_shape // 2, -resized_shape // 2)
             (img, lane_label), labels = random_perspective(
-                combination=combination,
+                combination=(img, lane_label),
                 targets=labels,
                 degrees=self.cfg.DATASET.ROT_FACTOR,
                 translate=self.cfg.DATASET.TRANSLATE,
                 scale=self.cfg.DATASET.SCALE_FACTOR,
-                shear=self.cfg.DATASET.SHEAR
+                shear=self.cfg.DATASET.SHEAR,
+                border=border,
             )
-
-            augment_hsv(img, hgain=self.cfg.DATASET.HSV_H, sgain=self.cfg.DATASET.HSV_S, vgain=self.cfg.DATASET.HSV_V)
-
+            if use_mixup:
+                idx2 = random.randint(0, len(self) - 1)
+                (img2, lane2), labels2 = load_mosaic(self, idx2, s=resized_shape)
+                (img2, lane2), labels2 = random_perspective(
+                    combination=(img2, lane2), targets=labels2,
+                    degrees=self.cfg.DATASET.ROT_FACTOR,
+                    translate=self.cfg.DATASET.TRANSLATE,
+                    scale=self.cfg.DATASET.SCALE_FACTOR,
+                    shear=self.cfg.DATASET.SHEAR,
+                    border=border,
+                )
+                img, lane_label, labels = mixup(img, lane_label, labels, img2, lane2, labels2)
+            h, w = img.shape[:2]
+            augment_hsv(img,
+                        hgain=self.cfg.DATASET.HSV_H,
+                        sgain=self.cfg.DATASET.HSV_S,
+                        vgain=self.cfg.DATASET.HSV_V)
             if len(labels):
                 labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
-                labels[:, [2, 4]] /= img.shape[0]
-                labels[:, [1, 3]] /= img.shape[1]
-
+                labels[:, [2, 4]] /= h
+                labels[:, [1, 3]] /= w
             if random.random() < 0.5:
                 img = np.fliplr(img)
                 lane_label = np.fliplr(lane_label)
                 if len(labels):
                     labels[:, 1] = 1 - labels[:, 1]
+            shapes = (h, w), ((1.0, 1.0), (0.0, 0.0))  # synthesized shape; not used by val
+
         else:
-            if len(labels):
-                labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
-                labels[:, [2, 4]] /= img.shape[0]
-                labels[:, [1, 3]] /= img.shape[1]
+            # ── Original YOLOP path: resize + letterbox + perspective/HSV/flip ──
+            data = self.db[idx]
+            img = cv2.imread(data["image"], cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            if img is None:
+                raise FileNotFoundError(f"Failed to read image: {data['image']}")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            lane_label = cv2.imread(data["lane"], 0)
+            if lane_label is None:
+                raise FileNotFoundError(f"Failed to read lane mask: {data['lane']}")
+
+            h0, w0 = img.shape[:2]
+            r = resized_shape / max(h0, w0)
+            if r != 1:
+                interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
+                img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
+                lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
+            h, w = img.shape[:2]
+
+            (img, lane_label), ratio, pad = letterbox((img, lane_label), resized_shape, auto=True, scaleup=self.is_train)
+            shapes = (h0, w0), ((h / h0, w / w0), pad)
+
+            det_label = data["label"]
+            labels = []
+            if det_label.size > 0:
+                labels = det_label.copy()
+                labels[:, 1] = ratio[0] * w * (det_label[:, 1] - det_label[:, 3] / 2) + pad[0]
+                labels[:, 2] = ratio[1] * h * (det_label[:, 2] - det_label[:, 4] / 2) + pad[1]
+                labels[:, 3] = ratio[0] * w * (det_label[:, 1] + det_label[:, 3] / 2) + pad[0]
+                labels[:, 4] = ratio[1] * h * (det_label[:, 2] + det_label[:, 4] / 2) + pad[1]
+
+            if self.is_train:
+                (img, lane_label), labels = random_perspective(
+                    combination=(img, lane_label),
+                    targets=labels,
+                    degrees=self.cfg.DATASET.ROT_FACTOR,
+                    translate=self.cfg.DATASET.TRANSLATE,
+                    scale=self.cfg.DATASET.SCALE_FACTOR,
+                    shear=self.cfg.DATASET.SHEAR,
+                )
+                augment_hsv(img, hgain=self.cfg.DATASET.HSV_H, sgain=self.cfg.DATASET.HSV_S, vgain=self.cfg.DATASET.HSV_V)
+                if len(labels):
+                    labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+                    labels[:, [2, 4]] /= img.shape[0]
+                    labels[:, [1, 3]] /= img.shape[1]
+                if random.random() < 0.5:
+                    img = np.fliplr(img)
+                    lane_label = np.fliplr(lane_label)
+                    if len(labels):
+                        labels[:, 1] = 1 - labels[:, 1]
+            else:
+                if len(labels):
+                    labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])
+                    labels[:, [2, 4]] /= img.shape[0]
+                    labels[:, [1, 3]] /= img.shape[1]
 
         labels_out = torch.zeros((len(labels), 6))
         if len(labels):
-            labels_out[:, 1:] = torch.from_numpy(labels)
+            labels_out[:, 1:] = torch.from_numpy(np.asarray(labels))
 
         img = np.ascontiguousarray(img)
 
@@ -233,7 +314,8 @@ class AutoDriveDataset(Dataset):
         target = [labels_out, lane_label]
         img = self.transform(img)
 
-        return img, target, data["image"], shapes
+        path = self.db[idx]["image"]
+        return img, target, path, shapes
 
     def select_data(self, db):
         db_selected = ...

@@ -1,16 +1,16 @@
 """
-Vehicle + Lane Line multi-task model.
-Adapted from YOLOP MCnet architecture:
-  - Shared encoder (Focus + CSP backbone + SPP)
-  - FPN neck
-  - Detection PAN head (nc=5 vehicle classes)
-  - Lane line segmentation decoder (progressive upsample)
-  - NO drivable-area segmentation head
+YOLOP-style Vehicle + Lane baseline (honestly labelled).
 
-Block config format: [from, module, args]
-  from: input layer index (-1 = previous layer, or int index, or list for concat)
-  module: class to instantiate
-  args: constructor arguments
+This model is YOLOP's `MCnet_0` block_cfg with two task-specific edits:
+  - drivable-area decoder deleted
+  - Detect `nc` 1 -> 5 (vehicle-only BDD classes)
+
+Nothing else here is YOLOPv2. Backbone = CSP + Focus + SPP. Neck =
+FPN + Upsample+Concat + PAN. Lane head = YOLOP progressive
+Upsample + Conv + BottleneckCSP decoder with a 2-channel (bg, fg)
+output passed through Sigmoid at forward time.
+
+For the phase-1 YOLOPv2-style baseline see `yolopv2_baseline.py`.
 """
 
 import torch

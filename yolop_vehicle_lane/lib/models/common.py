@@ -274,3 +274,111 @@ class Detect(nn.Module):
         for d in x:
             for k in ['imgs', 'pred', 'xyxy', 'xyxyn', 'xywh', 'xywhn']:
                 setattr(d, k, getattr(d, k)[0])  # pop out of list"""
+
+
+# ─────────────────────────────────────────────────────────────────────
+# YOLOPv2-style blocks.
+# YOLOPv2's release ships torch.jit-scripted weights only; there is no
+# Python architecture source. The blocks below are [INFERRED] from:
+#   (a) the YOLOPv2 paper's text ("ELAN structures", "deconvolution"),
+#   (b) YOLOv7's upstream ELAN / SPPCSPC implementation,
+#   (c) the output-shape contract in external_repos/YOLOPv2/demo.py.
+# Each block is marked and deliberately conservative.
+# ─────────────────────────────────────────────────────────────────────
+
+class ELAN(nn.Module):
+    """Efficient Layer Aggregation Network block.
+    [INFERRED from YOLOv7 yolov7.yaml] — two 1x1 branches; the second
+    branch runs through four stacked 3x3 convs and we concat the outputs
+    of every 3x3 (4 intermediates) with the two 1x1 branches, then 1x1
+    fuse. Number of intermediates (4) chosen to match YOLOv7-small.
+    """
+
+    def __init__(self, c1, c2, e=0.5, n_3x3=4):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.m = nn.ModuleList(Conv(c_, c_, 3, 1) for _ in range(n_3x3))
+        self.fuse = Conv(c_ * (2 + n_3x3), c2, 1, 1)
+
+    def forward(self, x):
+        y1 = self.cv1(x)
+        y2 = self.cv2(x)
+        feats = [y1, y2]
+        h = y2
+        for m in self.m:
+            h = m(h)
+            feats.append(h)
+        return self.fuse(torch.cat(feats, 1))
+
+
+class MP(nn.Module):
+    """MaxPool + Conv down-transition, YOLOv7 MPConv style.
+    [INFERRED from YOLOv7]. Halves spatial size, preserves channels.
+    """
+
+    def __init__(self, c1, c2):
+        super().__init__()
+        c_ = c2 // 2
+        self.cv1 = Conv(c1, c_, 1, 1)          # left branch after MaxPool
+        self.cv2 = Conv(c1, c_, 1, 1)          # right branch stem
+        self.cv3 = Conv(c_, c_, 3, 2)          # right branch stride-2 conv
+        self.mp = nn.MaxPool2d(kernel_size=2, stride=2)
+
+    def forward(self, x):
+        left = self.cv1(self.mp(x))
+        right = self.cv3(self.cv2(x))
+        return torch.cat([left, right], 1)
+
+
+class SPPCSPC(nn.Module):
+    """SPP with CSP wrapping, as in YOLOv7.
+    [INFERRED — YOLOPv2 paper does not disclose its SPP variant; SPPCSPC
+    is YOLOv7's default and keeps the model in the right parameter band.]
+    """
+
+    def __init__(self, c1, c2, k=(5, 9, 13), e=0.5):
+        super().__init__()
+        c_ = int(2 * c2 * e)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.cv3 = Conv(c_, c_, 3, 1)
+        self.cv4 = Conv(c_, c_, 1, 1)
+        self.m = nn.ModuleList(nn.MaxPool2d(kernel_size=kk, stride=1, padding=kk // 2) for kk in k)
+        self.cv5 = Conv(4 * c_, c_, 1, 1)
+        self.cv6 = Conv(c_, c_, 3, 1)
+        self.cv7 = Conv(2 * c_, c2, 1, 1)
+
+    def forward(self, x):
+        y1 = self.cv4(self.cv3(self.cv1(x)))
+        y1 = self.cv6(self.cv5(torch.cat([y1] + [m(y1) for m in self.m], 1)))
+        y2 = self.cv2(x)
+        return self.cv7(torch.cat([y1, y2], 1))
+
+
+class DeconvBlock(nn.Module):
+    """ConvTranspose2d(stride=2) + BN + SiLU, plus a 3x3 Conv refine.
+    [INFERRED — YOLOPv2 paper mentions deconvolution; exact shape of the
+    block is not disclosed. Two-layer design keeps param count modest.]
+    """
+
+    def __init__(self, c1, c2):
+        super().__init__()
+        self.up = nn.ConvTranspose2d(c1, c2, kernel_size=2, stride=2, bias=False)
+        self.bn = nn.BatchNorm2d(c2, momentum=BN_MOMENTUM)
+        self.act = nn.SiLU(inplace=True)
+        self.refine = Conv(c2, c2, 3, 1)
+
+    def forward(self, x):
+        return self.refine(self.act(self.bn(self.up(x))))
+
+
+class IDetect(Detect):
+    """YOLOv7-style detection head. Functionally identical to Detect here;
+    subclassing keeps the name tied to the YOLOv7 / YOLOPv2 lineage so
+    future readers know which code family to compare against.
+    [INFERRED — YOLOPv2 paper does not name its head; YOLOv7 uses IDetect.]
+    """
+
+    pass
