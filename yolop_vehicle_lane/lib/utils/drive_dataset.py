@@ -243,6 +243,66 @@ def find_raw_bdd_root(ecocar_root: str, auto_extract: bool = True) -> str:
     raise FileNotFoundError(f'Could not find raw BDD root. Tried: {ordered_candidates}')
 
 
+def _first_existing_dir(candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c and os.path.isdir(c):
+            return c
+    return None
+
+
+def resolve_bdd_images_100k_dir(raw_bdd_root: str) -> str:
+    """Return a directory that contains `train/` and `val/` image folders.
+
+    The raw BDD snapshot can be laid out in several ways — handoff note §3:
+      * `raw/images/100k/train`
+      * `raw/bdd100k/images/100k/train`
+      * `raw/train` (rare, pre-extracted flat layout)
+    We try all three. Callers can still override via config.
+    """
+    if not raw_bdd_root:
+        raise FileNotFoundError('raw_bdd_root is empty')
+    candidates = [
+        os.path.join(raw_bdd_root, 'images', '100k'),
+        os.path.join(raw_bdd_root, 'bdd100k', 'images', '100k'),
+        os.path.join(raw_bdd_root, '100k'),
+        raw_bdd_root,
+    ]
+    for root in candidates:
+        if (os.path.isdir(os.path.join(root, 'train'))
+                and os.path.isdir(os.path.join(root, 'val'))):
+            return root
+    # Softer: return first candidate that even has `train`.
+    for root in candidates:
+        if os.path.isdir(os.path.join(root, 'train')):
+            return root
+    raise FileNotFoundError(
+        f'Could not find an images/100k-style layout under: {candidates}')
+
+
+def resolve_bdd_labels_100k_dir(raw_bdd_root: str) -> str:
+    """Return a directory holding per-split detection JSONs (see handoff §3).
+
+    Tries `labels/100k/{split}`, `bdd100k/labels/100k/{split}`, and — for
+    the old per-image layout — `100k/{split}`.
+    """
+    if not raw_bdd_root:
+        raise FileNotFoundError('raw_bdd_root is empty')
+    candidates = [
+        os.path.join(raw_bdd_root, 'labels', '100k'),
+        os.path.join(raw_bdd_root, 'bdd100k', 'labels', '100k'),
+        os.path.join(raw_bdd_root, '100k'),   # old per-image dir layout
+    ]
+    for root in candidates:
+        if (os.path.isdir(os.path.join(root, 'train'))
+                and os.path.isdir(os.path.join(root, 'val'))):
+            return root
+    for root in candidates:
+        if os.path.isdir(os.path.join(root, 'train')):
+            return root
+    raise FileNotFoundError(
+        f'Could not find a labels/100k-style layout under: {candidates}')
+
+
 def find_lane_polygon_jsons(raw_bdd_root: str):
     candidates = {
         'train': [
