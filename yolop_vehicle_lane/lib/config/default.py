@@ -53,6 +53,7 @@ _C.LOSS.OBJ_GAIN = 1.0
 _C.LOSS.LL_SEG_GAIN = 1.0   # lane line segmentation loss gain (YOLOP/YOLOPv2 mask path)
 _C.LOSS.LL_IOU_GAIN = 0.2   # lane line IoU loss gain
 _C.LOSS.LL_FL_GAMMA = 0.0   # lane seg focal-loss γ; YOLOPv2 paper turns this on
+_C.LOSS.LL_DICE_GAIN = 0.0  # hybrid focal+dice variant (YOLOPv2 §3 ablation)
 # Task weights for the YOLOPv2-DETRLane Stage-2 variant only.
 _C.LOSS.DET_TASK_WEIGHT = 1.0
 _C.LOSS.LANE_TASK_WEIGHT = 1.0
@@ -141,6 +142,14 @@ _C.TRAIN.WD = 0.0005
 _C.TRAIN.NESTEROV = True
 _C.TRAIN.GAMMA1 = 0.99
 _C.TRAIN.GAMMA2 = 0.0
+
+# Scheduler: off = cosine-annealing + linear warmup (YOLOP default, our
+# paper-closest interpretation). On = torch SGDR. YOLOPv2 paper text
+# mentions "warm restart" without publishing T_0/T_mult — mark [INFERRED]
+# if the ablation is enabled.
+_C.TRAIN.SGDR = False
+_C.TRAIN.SGDR_T0 = 100          # default restart period ≈ END_EPOCH/3
+_C.TRAIN.SGDR_TMULT = 1
 
 _C.TRAIN.BEGIN_EPOCH = 0
 _C.TRAIN.END_EPOCH = 100

@@ -117,6 +117,14 @@ class MCnet(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
+        """Returns [det_heads, ll_seg_logits].
+
+        DELTA vs YOLOP upstream: YOLOP applies `nn.Sigmoid()` in forward
+        and then pairs it with `BCEWithLogitsLoss`, which sigmoids
+        internally — a double-sigmoid bug. We return raw logits so the
+        loss path is mathematically consistent. argmax-based eval paths
+        are unaffected. Use `.predict()` for sigmoided probabilities.
+        """
         cache = []
         out = []
         det_out = None
@@ -126,13 +134,18 @@ class MCnet(nn.Module):
                     [x if j == -1 else cache[j] for j in block.from_]
             x = block(x)
             if i in self.seg_out_idx:
-                m = nn.Sigmoid()
-                out.append(m(x))
+                out.append(x)  # raw logits
             if i == self.detector_index:
                 det_out = x
             cache.append(x if block.index in self.save else None)
         out.insert(0, det_out)
-        return out  # [det_heads, ll_seg]
+        return out
+
+    @torch.no_grad()
+    def predict(self, x):
+        out = self.forward(x)
+        det_out, lane_logits = out
+        return det_out, torch.sigmoid(lane_logits)
 
     def _initialize_biases(self, cf=None):
         m = self.model[self.detector_index]

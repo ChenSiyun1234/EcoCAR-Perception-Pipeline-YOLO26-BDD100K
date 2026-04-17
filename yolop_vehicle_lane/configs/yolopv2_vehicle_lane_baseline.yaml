@@ -46,7 +46,10 @@ LOSS:
   # for the lane seg head. γ values are [INFERRED]; 1.5 is YOLOv5's and
   # YOLOP's code default; the paper does not publish its γ.
   FL_GAMMA: 1.5                  # det cls + det obj
-  LL_FL_GAMMA: 1.5               # lane seg (new knob)
+  LL_FL_GAMMA: 1.5               # lane seg focal γ
+  # YOLOPv2 §3 reports a focal+dice ablation. Set LL_DICE_GAIN > 0 to
+  # enable the hybrid; default 0 = focal-only baseline.
+  LL_DICE_GAIN: 0.0
   MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]  # [cls, obj, iou, ll_seg, ll_iou]
 
 DATASET:

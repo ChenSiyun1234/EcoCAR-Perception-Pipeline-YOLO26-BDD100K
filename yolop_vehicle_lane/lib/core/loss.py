@@ -91,10 +91,30 @@ class MultiHeadLoss(nn.Module):
 
             lobj += BCEobj(pi[..., 4], tobj) * balance[i]
 
-        # Lane line segmentation loss (predictions[1] is lane, was predictions[2] in YOLOP)
+        # ── Lane seg loss ────────────────────────────────────────────
+        # predictions[1] is RAW logits (see model.forward docstring —
+        # the YOLOP-upstream double-sigmoid bug is fixed). BCEseg here
+        # is `BCEWithLogitsLoss` (optionally focal-wrapped if
+        # LOSS.LL_FL_GAMMA > 0), which consumes logits correctly.
+        # targets[1] is a 2-channel (bg, fg) binary tensor.
         lane_line_seg_predicts = predictions[1].view(-1)
         lane_line_seg_targets = targets[1].view(-1)
         lseg_ll = BCEseg(lane_line_seg_predicts, lane_line_seg_targets)
+
+        # Hybrid focal + dice variant (YOLOPv2 paper §3 ablation).
+        # LOSS.LL_DICE_GAIN > 0 turns it on. Dice operates on the
+        # sigmoided foreground-channel probabilities.
+        ldice_ll = torch.zeros(1, device=device)
+        dice_gain = float(getattr(cfg.LOSS, 'LL_DICE_GAIN', 0.0) or 0.0)
+        if dice_gain > 0:
+            # predictions[1]: [B, 2, H, W] logits. We take channel 1 (fg)
+            # as the lane-presence logit and sigmoid it to [0,1].
+            fg_prob = torch.sigmoid(predictions[1][:, 1])              # [B, H, W]
+            fg_tgt = targets[1][:, 1].to(fg_prob.dtype)                # [B, H, W]
+            inter = (fg_prob * fg_tgt).sum(dim=(1, 2))
+            denom = fg_prob.sum(dim=(1, 2)) + fg_tgt.sum(dim=(1, 2))
+            dice = (2.0 * inter + 1.0) / (denom + 1.0)
+            ldice_ll = (1.0 - dice).mean().unsqueeze(0)
 
         # Lane line IoU loss
         metric = SegmentationMetric(2)
@@ -120,19 +140,23 @@ class MultiHeadLoss(nn.Module):
         # Scale lane losses
         lseg_ll *= cfg.LOSS.LL_SEG_GAIN * self.lambdas[3]
         liou_ll *= cfg.LOSS.LL_IOU_GAIN * self.lambdas[4]
+        if dice_gain > 0:
+            ldice_ll = ldice_ll * dice_gain
 
         # Task-specific training modes
         if cfg.TRAIN.DET_ONLY or cfg.TRAIN.ENC_DET_ONLY:
             lseg_ll = 0 * lseg_ll
             liou_ll = 0 * liou_ll
+            ldice_ll = 0 * ldice_ll
 
         if cfg.TRAIN.LANE_ONLY:
             lcls = 0 * lcls
             lobj = 0 * lobj
             lbox = 0 * lbox
 
-        loss = lbox + lobj + lcls + lseg_ll + liou_ll
-        return loss, (lbox.item(), lobj.item(), lcls.item(), lseg_ll.item(), liou_ll.item(), loss.item())
+        loss = lbox + lobj + lcls + lseg_ll + liou_ll + ldice_ll
+        return loss, (lbox.item(), lobj.item(), lcls.item(),
+                      lseg_ll.item(), liou_ll.item(), loss.item())
 
 
 def get_loss(cfg, device):

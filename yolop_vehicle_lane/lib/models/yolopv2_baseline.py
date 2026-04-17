@@ -144,6 +144,19 @@ class MCnetV2(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
+        """Returns [det_heads, lane_logits_2ch].
+
+        NOTE: lane output is **raw logits**, not probabilities. The
+        YOLOP-upstream code applies `nn.Sigmoid()` here and then the
+        loss uses `BCEWithLogitsLoss`, which sigmoids internally —
+        a double-sigmoid bug. We return logits so:
+          * BCEWithLogitsLoss / FocalLoss (logits variant) consume them
+            correctly,
+          * argmax-based predictions in validate() still work (order
+            preserved under any monotonic transform),
+          * callers that need probabilities should call
+            `torch.sigmoid(lane_logits)` explicitly (see `.predict()`).
+        """
         cache = []
         out = []
         det_out = None
@@ -153,12 +166,21 @@ class MCnetV2(nn.Module):
                     [x if j == -1 else cache[j] for j in block.from_]
             x = block(x)
             if i in self.seg_out_idx:
-                out.append(nn.Sigmoid()(x))
+                out.append(x)  # raw logits — see forward() docstring
             if i == self.detector_index:
                 det_out = x
             cache.append(x if block.index in self.save else None)
         out.insert(0, det_out)
-        return out  # [det_heads, lane_seg_2ch]
+        return out
+
+    @torch.no_grad()
+    def predict(self, x):
+        """Inference wrapper: returns sigmoid'd lane probabilities + det output.
+        Use this at export / demo time.
+        """
+        out = self.forward(x)
+        det_out, lane_logits = out
+        return det_out, torch.sigmoid(lane_logits)
 
     def _initialize_biases(self, cf=None):
         m = self.model[self.detector_index]

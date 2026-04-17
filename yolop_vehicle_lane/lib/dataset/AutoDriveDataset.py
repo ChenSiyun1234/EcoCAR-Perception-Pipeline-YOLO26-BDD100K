@@ -196,7 +196,18 @@ class AutoDriveDataset(Dataset):
         use_mixup = bool(self.is_train and getattr(self.cfg.DATASET, 'MIXUP', False)
                          and random.random() < getattr(self.cfg.DATASET, 'MIXUP_PROB', 0.15))
 
-        resized_shape = self.inputsize
+        # `inputsize` can be:
+        #   int                → square letterbox with auto=True
+        #                        (YOLOP style; for 1280x720 this produces
+        #                         H=384 naturally via stride=32 rounding).
+        #   tuple / list (H,W) → explicit rectangular letterbox
+        #                        (auto=False). Used for YOLOPv2 val @ 384×640.
+        explicit_shape = None
+        if isinstance(self.inputsize, (list, tuple)):
+            explicit_shape = (int(self.inputsize[0]), int(self.inputsize[1]))
+            resized_shape = max(explicit_shape)
+        else:
+            resized_shape = int(self.inputsize)
         if isinstance(resized_shape, list):
             resized_shape = max(resized_shape)
 
@@ -262,7 +273,17 @@ class AutoDriveDataset(Dataset):
                 lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
             h, w = img.shape[:2]
 
-            (img, lane_label), ratio, pad = letterbox((img, lane_label), resized_shape, auto=True, scaleup=self.is_train)
+            if explicit_shape is not None:
+                # Explicit rectangular target (e.g. val @ 384×640). Uses
+                # letterbox auto=False so we get exactly the requested
+                # output shape, not the YOLOP `stride-rounded` shape.
+                (img, lane_label), ratio, pad = letterbox(
+                    (img, lane_label), explicit_shape,
+                    auto=False, scaleup=self.is_train)
+            else:
+                (img, lane_label), ratio, pad = letterbox(
+                    (img, lane_label), resized_shape,
+                    auto=True, scaleup=self.is_train)
             shapes = (h0, w0), ((h / h0, w / w0), pad)
 
             det_label = data["label"]
