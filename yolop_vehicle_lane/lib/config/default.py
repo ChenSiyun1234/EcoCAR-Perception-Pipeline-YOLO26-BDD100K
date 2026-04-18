@@ -143,12 +143,13 @@ _C.TRAIN.NESTEROV = True
 _C.TRAIN.GAMMA1 = 0.99
 _C.TRAIN.GAMMA2 = 0.0
 
-# Scheduler: off = cosine-annealing + linear warmup (YOLOP default, our
-# paper-closest interpretation). On = torch SGDR. YOLOPv2 paper text
-# mentions "warm restart" without publishing T_0/T_mult — mark [INFERRED]
-# if the ablation is enabled.
-_C.TRAIN.SGDR = False
-_C.TRAIN.SGDR_T0 = 100          # default restart period ≈ END_EPOCH/3
+# Scheduler: True = torch SGDR (CosineAnnealingWarmRestarts) — the
+# literal reading of YOLOPv2 paper §3 "cosine annealing with warm
+# restart", now the primary default for the best-row target.
+# False = cosine-annealing + single linear warmup (YOLOP default).
+# Both T_0 / T_mult are [INFERRED] — the paper does not publish them.
+_C.TRAIN.SGDR = True
+_C.TRAIN.SGDR_T0 = 100
 _C.TRAIN.SGDR_TMULT = 1
 
 _C.TRAIN.BEGIN_EPOCH = 0

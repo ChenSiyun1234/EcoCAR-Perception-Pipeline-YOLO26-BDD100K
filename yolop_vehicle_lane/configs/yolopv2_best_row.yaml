@@ -1,0 +1,132 @@
+# ══════════════════════════════════════════════════════════════════════
+#  PRIMARY TARGET — YOLOPv2 "best row" (arXiv 2208.11434 §3, final
+#                    cumulative ablation row, drivable-area removed).
+# ══════════════════════════════════════════════════════════════════════
+# The paper's ablation is cumulative:
+#     YOLOP
+#   +  ELAN / group-conv backbone        (architecture)
+#   +  SPP kept in neck                  (architecture)
+#   +  Mosaic + MixUp                    (Bag of Freebies)
+#   +  focal loss for det cls + obj      (BoF)
+#   +  focal loss for lane seg           (BoF)
+#   +  focal + dice  (hybrid lane seg)   ← best row
+#
+# Every switch in this YAML corresponds to one of those rows being
+# turned on. `LL_DICE_GAIN > 0` is the delta that distinguishes the
+# best row from the earlier "focal-only lane" row — see
+# `yolopv2_focal_only_ablation.yaml` for the preceding row.
+#
+# Drivable-area is the ONLY intentional deviation from the paper.
+
+GPUS: (0,)
+WORKERS: 8
+PIN_MEMORY: true
+PRINT_FREQ: 20
+AUTO_RESUME: true
+NEED_AUTOANCHOR: false
+DEBUG: false
+
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+
+DRIVE:
+  ROOT: '/content/drive/MyDrive/EcoCAR'
+  # Best-row artefacts live under a dedicated subdir so ablation runs
+  # can land side-by-side without clobbering each other.
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/checkpoints/yolopv2_best_row'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics/yolopv2_best_row'
+
+MODEL:
+  NAME: 'YOLOPv2'
+  NC: 5
+  VEHICLE_CLASSES: ['car', 'truck', 'bus', 'motorcycle', 'bicycle']
+  PRETRAINED: ''
+  IMAGE_SIZE: [640, 640]         # train letterbox target (W, H)
+
+LOSS:
+  # Detection gains — same as YOLOP (paper doesn't override).
+  BOX_GAIN: 0.05
+  CLS_GAIN: 0.5
+  OBJ_GAIN: 1.0
+  CLS_POS_WEIGHT: 1.0
+  OBJ_POS_WEIGHT: 1.0
+  SEG_POS_WEIGHT: 1.0
+  LL_SEG_GAIN: 1.0
+  LL_IOU_GAIN: 0.2
+  # Paper §3 BoF: focal loss for det cls/obj.
+  FL_GAMMA: 1.5                  # [INFERRED] γ not published; 1.5 = YOLOv5/YOLOP default
+  # Paper §3 BoF: focal loss for lane seg.
+  LL_FL_GAMMA: 1.5               # [INFERRED] γ not published
+  # Paper §3 best row: hybrid focal + dice on lane seg.
+  LL_DICE_GAIN: 0.5              # [INFERRED] weight not published; 0.5 keeps dice ≲ focal
+  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]   # [cls, obj, iou, ll_seg, ll_iou]
+
+DATASET:
+  DATASET: 'BddDataset'
+  TRAIN_SET: 'train'
+  TEST_SET: 'val'
+  DATA_FORMAT: 'jpg'
+  ORG_IMG_SIZE: [720, 1280]
+  # Paper §3 BoF: Mosaic + MixUp in the training path.
+  FLIP: true
+  SCALE_FACTOR: 0.5
+  ROT_FACTOR: 0
+  TRANSLATE: 0.2
+  SHEAR: 0.0
+  COLOR_RGB: false
+  HSV_H: 0.015
+  HSV_S: 0.7
+  HSV_V: 0.4
+  MOSAIC: true
+  MOSAIC_PROB: 1.0
+  MIXUP: true
+  MIXUP_PROB: 0.15
+  # Paper §3: lane mask widths.
+  LANE_TRAIN_THICKNESS: 8
+  LANE_TEST_THICKNESS: 2
+
+TRAIN:
+  # Paper §3 training protocol. SGD + cosine warm restarts — see below.
+  OPTIMIZER: 'sgd'
+  LR0: 0.01
+  LRF: 0.2
+  MOMENTUM: 0.937
+  WD: 0.005
+  NESTEROV: true
+  WARMUP_EPOCHS: 3.0
+  WARMUP_BIASE_LR: 0.1
+  WARMUP_MOMENTUM: 0.8
+  GAMMA1: 0.99
+  GAMMA2: 0.0
+  BEGIN_EPOCH: 0
+  END_EPOCH: 300
+  # Scheduler: paper §3 says "cosine annealing with warm restart". We
+  # default to real SGDR (CosineAnnealingWarmRestarts) because that is
+  # the literal reading. T_0 and T_mult are NOT published by the paper
+  # — [INFERRED]. Defaults = 100, 1 → restarts at epochs 100 and 200
+  # across the 300-epoch budget.
+  SGDR: true
+  SGDR_T0: 100
+  SGDR_TMULT: 1
+  VAL_FREQ: 1
+  BATCH_SIZE_PER_GPU: 16
+  SHUFFLE: true
+  IOU_THRESHOLD: 0.2
+  ANCHOR_THRESHOLD: 4.0
+  DET_ONLY: false
+  LANE_ONLY: false
+  ENC_DET_ONLY: false
+  PLOT: true
+
+TEST:
+  BATCH_SIZE_PER_GPU: 24
+  MODEL_FILE: ''
+  SAVE_JSON: false
+  SAVE_TXT: false
+  PLOTS: true
+  NMS_CONF_THRESHOLD: 0.001
+  NMS_IOU_THRESHOLD: 0.6
+  # Paper §3: test letterbox 640 × 384.
+  IMAGE_SIZE: [640, 384]         # (W, H)

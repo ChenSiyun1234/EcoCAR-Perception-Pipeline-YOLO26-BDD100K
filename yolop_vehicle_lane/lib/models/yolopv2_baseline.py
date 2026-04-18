@@ -144,18 +144,25 @@ class MCnetV2(nn.Module):
         initialize_weights(self)
 
     def forward(self, x):
-        """Returns [det_heads, lane_logits_2ch].
+        """Training / evaluation forward pass.
 
-        NOTE: lane output is **raw logits**, not probabilities. The
-        YOLOP-upstream code applies `nn.Sigmoid()` here and then the
-        loss uses `BCEWithLogitsLoss`, which sigmoids internally —
-        a double-sigmoid bug. We return logits so:
-          * BCEWithLogitsLoss / FocalLoss (logits variant) consume them
-            correctly,
-          * argmax-based predictions in validate() still work (order
-            preserved under any monotonic transform),
-          * callers that need probabilities should call
-            `torch.sigmoid(lane_logits)` explicitly (see `.predict()`).
+        Returns `[det_out, lane_logits]` where:
+          * `det_out` is the YOLOP-style detection output (training
+            mode: list of 3 raw grid tensors; eval mode: `(infer, train_out)`
+            tuple from `Detect.forward`);
+          * `lane_logits` is a **2-channel raw-logits** map at **full
+            input resolution** with channels ordered as (bg, fg).
+
+        This is the single training contract — the loss pipeline
+        (`MultiHeadLoss` + optional focal + optional dice on sigmoided
+        probabilities) consumes these logits directly via
+        `BCEWithLogitsLoss`. argmax over the channel axis still works
+        for visualization because argmax is monotonic-invariant.
+
+        The YOLOPv2 public demo (`external_repos/YOLOPv2/demo.py`)
+        exports a different contract — 1-channel sigmoid at H/2 × W/2.
+        To match the demo contract at inference / export time, use
+        `predict()` instead of `forward()`.
         """
         cache = []
         out = []
@@ -166,7 +173,7 @@ class MCnetV2(nn.Module):
                     [x if j == -1 else cache[j] for j in block.from_]
             x = block(x)
             if i in self.seg_out_idx:
-                out.append(x)  # raw logits — see forward() docstring
+                out.append(x)          # raw logits (training contract)
             if i == self.detector_index:
                 det_out = x
             cache.append(x if block.index in self.save else None)
@@ -175,12 +182,31 @@ class MCnetV2(nn.Module):
 
     @torch.no_grad()
     def predict(self, x):
-        """Inference wrapper: returns sigmoid'd lane probabilities + det output.
-        Use this at export / demo time.
+        """Inference / export wrapper matching the YOLOPv2 demo contract.
+
+        Returns `(det_out, lane_prob_half_res_1ch)`:
+          * `det_out` unchanged from `forward()`;
+          * `lane_prob_half_res_1ch` is `sigmoid(fg_logits)` at
+            **half input resolution** (H/2 × W/2), a single channel —
+            byte-compatible with
+            `external_repos/YOLOPv2/utils/utils.py::lane_line_mask`
+            which calls `torch.round(sigmoid(ll)).squeeze(1)` on the
+            same tensor shape.
+
+        Downstream consumers:
+          * notebook 06 (export) — use this for ONNX / TorchScript.
+          * notebook 07 (A5000 profile) — use this for latency.
+          * validate() in training — uses `forward()` directly (logits
+            argmax path), not `predict()`.
         """
         out = self.forward(x)
-        det_out, lane_logits = out
-        return det_out, torch.sigmoid(lane_logits)
+        det_out, lane_logits = out       # lane_logits: [B, 2, H, W]
+        fg_logits = lane_logits[:, 1:2]   # keep the fg channel only
+        fg_prob = torch.sigmoid(fg_logits)
+        # Downsample to H/2 × W/2 to match the demo contract.
+        lane_prob_half = torch.nn.functional.interpolate(
+            fg_prob, scale_factor=0.5, mode='bilinear', align_corners=False)
+        return det_out, lane_prob_half
 
     def _initialize_biases(self, cf=None):
         m = self.model[self.detector_index]
