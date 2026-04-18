@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 from .general import bbox_iou
 from .postprocess import build_targets
-from lib.core.evaluate import SegmentationMetric
 
 
 class MultiHeadLoss(nn.Module):
@@ -116,20 +115,31 @@ class MultiHeadLoss(nn.Module):
             dice = (2.0 * inter + 1.0) / (denom + 1.0)
             ldice_ll = (1.0 - dice).mean().unsqueeze(0)
 
-        # Lane line IoU loss
-        metric = SegmentationMetric(2)
+        # Lane line IoU loss — DIFFERENTIABLE soft-IoU on sigmoid probabilities.
+        #
+        # REPAIR (v5): YOLOP upstream (and the previous version of this file)
+        # computed IoU via `torch.max(...)` argmax + `SegmentationMetric(...)
+        # .cpu()`, which is fundamentally non-differentiable — argmax has no
+        # gradient and `.cpu()` severs the graph. That meant this term
+        # contributed ZERO gradient signal to the lane decoder. We replace it
+        # with a soft-IoU computed on `sigmoid(fg_logits)` against the fg
+        # target channel. Padding rows/cols (outside the letterboxed content)
+        # are cropped out before the reduction so padding does not bias the
+        # denominator.
         nb, _, height, width = targets[1].shape
         pad_w, pad_h = shapes[0][1][1]
         pad_w = int(pad_w)
         pad_h = int(pad_h)
-        _, lane_line_pred = torch.max(predictions[1], 1)
-        _, lane_line_gt = torch.max(targets[1], 1)
-        lane_line_pred = lane_line_pred[:, pad_h:height-pad_h, pad_w:width-pad_w]
-        lane_line_gt = lane_line_gt[:, pad_h:height-pad_h, pad_w:width-pad_w]
-        metric.reset()
-        metric.addBatch(lane_line_pred.cpu(), lane_line_gt.cpu())
-        IoU = metric.IntersectionOverUnion()
-        liou_ll = 1 - IoU
+        fg_logits = predictions[1][:, 1]                              # [B, H, W]
+        fg_prob = torch.sigmoid(fg_logits)
+        fg_tgt = targets[1][:, 1].to(fg_prob.dtype)
+        if pad_h > 0 or pad_w > 0:
+            fg_prob = fg_prob[:, pad_h:height - pad_h, pad_w:width - pad_w]
+            fg_tgt = fg_tgt[:, pad_h:height - pad_h, pad_w:width - pad_w]
+        inter = (fg_prob * fg_tgt).sum(dim=(1, 2))
+        union = (fg_prob + fg_tgt - fg_prob * fg_tgt).sum(dim=(1, 2))
+        soft_iou = (inter + 1.0) / (union + 1.0)
+        liou_ll = (1.0 - soft_iou).mean().unsqueeze(0)
 
         # Scale detection losses
         s = 3 / no

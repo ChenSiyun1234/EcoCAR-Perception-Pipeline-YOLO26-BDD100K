@@ -57,7 +57,17 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
     # monotonically and made Speed look like 0.0 samples/s.
     end = time.time()
     for i, (input, target, paths, shapes) in enumerate(train_loader):
-        num_iter = i + num_batch * (epoch - 1)
+        # REPAIR (v5): YOLOP upstream uses `num_batch * (epoch - 1)` because
+        # its loop is 1-indexed (epoch goes 1..END_EPOCH). Our notebook uses a
+        # 0-indexed loop (epoch goes 0..END_EPOCH-1). With the old formula
+        # `num_iter` was NEGATIVE for every iteration of epoch 0, which made
+        # `np.interp(num_iter, [0, num_warmup], ...)` clamp LR to 0 for the
+        # weight groups and to WARMUP_BIASE_LR for the bias group — i.e.
+        # only biases trained during epoch 0 while weights sat frozen at
+        # zero. That is almost certainly why lane IoU collapsed to 0 after
+        # epoch 0 and never recovered. Using `epoch` directly lines up with
+        # the 0-indexed outer loop.
+        num_iter = i + num_batch * epoch
 
         if num_iter < num_warmup:
             lf = lambda x: ((1 + math.cos(x * math.pi / cfg.TRAIN.END_EPOCH)) / 2) * \
@@ -226,13 +236,26 @@ def validate(epoch, config, val_loader, val_dataset, model, criterion, output_di
                     for i in range(test_batch_size):
                         # Lane line visualization
                         img_ll = cv2.imread(paths[i])
+                        # REPAIR (v5): take argmax FIRST, then upsample with
+                        # nearest — upsampling the 2-channel logits with
+                        # bilinear then argmax'ing was wrong (mixes classes at
+                        # boundaries). Thin lane supervision also demands
+                        # nearest, never bilinear.
                         ll_seg_mask = ll_seg_out[i][:, pad_h:height-pad_h, pad_w:width-pad_w].unsqueeze(0)
-                        ll_seg_mask = torch.nn.functional.interpolate(ll_seg_mask, scale_factor=int(1/ratio), mode='bilinear')
                         _, ll_seg_mask = torch.max(ll_seg_mask, 1)
+                        ll_seg_mask = torch.nn.functional.interpolate(
+                            ll_seg_mask.unsqueeze(1).float(),
+                            scale_factor=float(1.0 / max(ratio, 1e-6)),
+                            mode='nearest',
+                        ).squeeze(1).long()
 
                         ll_gt_mask = target[1][i][:, pad_h:height-pad_h, pad_w:width-pad_w].unsqueeze(0)
-                        ll_gt_mask = torch.nn.functional.interpolate(ll_gt_mask, scale_factor=int(1/ratio), mode='bilinear')
                         _, ll_gt_mask = torch.max(ll_gt_mask, 1)
+                        ll_gt_mask = torch.nn.functional.interpolate(
+                            ll_gt_mask.unsqueeze(1).float(),
+                            scale_factor=float(1.0 / max(ratio, 1e-6)),
+                            mode='nearest',
+                        ).squeeze(1).long()
 
                         ll_seg_mask = ll_seg_mask.int().squeeze().cpu().numpy()
                         ll_gt_mask = ll_gt_mask.int().squeeze().cpu().numpy()
@@ -352,7 +375,14 @@ def validate(epoch, config, val_loader, val_dataset, model, criterion, output_di
         for i, c in enumerate(ap_class):
             print(pf % (names[c], seen, nt[c], p[i], r[i], ap50[i], ap[i]))
 
-    t = tuple(x / seen * 1E3 for x in (t_inf, t_nms, t_inf + t_nms)) + (imgsz, imgsz, batch_size)
+    # REPAIR (v5): `t_inf` / `t_nms` here are the LAST batch's wall clocks,
+    # not cumulative totals, so the old `x / seen * 1E3` produced a number
+    # that scaled inversely with the number of validation batches. Use the
+    # AverageMeter .avg values instead — those are per-image already.
+    inf_ms = T_inf.avg * 1e3
+    nms_ms = T_nms.avg * 1e3
+    total_ms = inf_ms + nms_ms
+    t = (inf_ms, nms_ms, total_ms, imgsz, imgsz, batch_size)
     if not training:
         print('Speed: %.1f/%.1f/%.1f ms inference/NMS/total per %gx%g image at batch-size %g' % t)
 

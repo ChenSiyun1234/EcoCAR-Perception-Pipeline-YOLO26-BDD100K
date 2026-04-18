@@ -270,7 +270,15 @@ class AutoDriveDataset(Dataset):
             if r != 1:
                 interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
                 img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
-                lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)), interpolation=interp)
+                # REPAIR (v5): lane masks are thin binary supervision (8
+                # px train / 2 px test per YOLOPv2 paper §3). Bilinear /
+                # area interp produces intermediate uint8 values that then
+                # get over- or under-selected by the downstream
+                # `threshold(>1)` binarizer. Use NEAREST everywhere a
+                # lane mask is resized / warped — in this file,
+                # load_mosaic, letterbox, and random_perspective.
+                lane_label = cv2.resize(lane_label, (int(w0 * r), int(h0 * r)),
+                                        interpolation=cv2.INTER_NEAREST)
             h, w = img.shape[:2]
 
             if explicit_shape is not None:

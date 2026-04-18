@@ -63,12 +63,18 @@ def random_perspective(combination, targets=(), degrees=10, translate=.1, scale=
     # Combined rotation matrix
     M = T @ S @ R @ P @ C
     if (border[0] != 0) or (border[1] != 0) or (M != np.eye(3)).any():
+        # REPAIR (v5): images use linear interp (default) but thin lane
+        # masks MUST use nearest — otherwise the warp smears the 8-pixel
+        # line into uint8 intermediates that don't survive the downstream
+        # `threshold(>1)` binarization consistently.
         if perspective:
             img = cv2.warpPerspective(img, M, dsize=(width, height), borderValue=(114, 114, 114))
-            line = cv2.warpPerspective(line, M, dsize=(width, height), borderValue=0)
+            line = cv2.warpPerspective(line, M, dsize=(width, height),
+                                        flags=cv2.INTER_NEAREST, borderValue=0)
         else:
             img = cv2.warpAffine(img, M[:2], dsize=(width, height), borderValue=(114, 114, 114))
-            line = cv2.warpAffine(line, M[:2], dsize=(width, height), borderValue=0)
+            line = cv2.warpAffine(line, M[:2], dsize=(width, height),
+                                   flags=cv2.INTER_NEAREST, borderValue=0)
 
     # Transform label coordinates
     n = len(targets)
@@ -160,7 +166,9 @@ def letterbox(combination, new_shape=(640, 640), color=(114, 114, 114), auto=Tru
 
     if shape[::-1] != new_unpad:
         img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
-        line = cv2.resize(line, new_unpad, interpolation=cv2.INTER_LINEAR)
+        # REPAIR (v5): lane mask must use NEAREST to preserve the thin
+        # binary supervision (see top-of-file note in AutoDriveDataset).
+        line = cv2.resize(line, new_unpad, interpolation=cv2.INTER_NEAREST)
 
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
@@ -251,7 +259,10 @@ def load_mosaic(dataset, index, s=640):
         if r != 1:
             interp = cv2.INTER_AREA if r < 1 else cv2.INTER_LINEAR
             img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=interp)
-            lane = cv2.resize(lane, (int(w * r), int(h * r)), interpolation=interp)
+            # REPAIR (v5): lane mask uses NEAREST regardless of the image
+            # interp choice — see AutoDriveDataset note.
+            lane = cv2.resize(lane, (int(w * r), int(h * r)),
+                               interpolation=cv2.INTER_NEAREST)
             if labels.size:
                 labels = labels.copy()
                 labels[:, 1:5] *= r
