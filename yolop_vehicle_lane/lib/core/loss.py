@@ -4,7 +4,7 @@ Adapted from YOLOP loss with drivable-area segmentation removed.
 
 Loss components:
   - Detection: BCEcls + BCEobj + CIoU box regression
-  - Lane: BCE segmentation + IoU
+  - Lane: paper-aligned focal/CE + optional Dice (+ optional IoU legacy term)
 
 Lambda order: [cls, obj, iou, ll_seg, ll_iou] - 5 elements
 """
@@ -56,7 +56,7 @@ class MultiHeadLoss(nn.Module):
         # Label smoothing
         cp, cn = smooth_BCE(eps=0.0)
 
-        BCEcls, BCEobj, BCEseg = self.losses
+        BCEcls, BCEobj, LaneSegLoss = self.losses
 
         # Detection losses
         nt = 0
@@ -91,48 +91,42 @@ class MultiHeadLoss(nn.Module):
             lobj += BCEobj(pi[..., 4], tobj) * balance[i]
 
         # ── Lane seg loss ────────────────────────────────────────────
-        # predictions[1] is RAW logits (see model.forward docstring —
-        # the YOLOP-upstream double-sigmoid bug is fixed). BCEseg here
-        # is `BCEWithLogitsLoss` (optionally focal-wrapped if
-        # LOSS.LL_FL_GAMMA > 0), which consumes logits correctly.
-        # targets[1] is a 2-channel (bg, fg) binary tensor.
-        lane_line_seg_predicts = predictions[1].view(-1)
-        lane_line_seg_targets = targets[1].view(-1)
-        lseg_ll = BCEseg(lane_line_seg_predicts, lane_line_seg_targets)
+        lane_logits = predictions[1]
+        lane_targets = targets[1].to(lane_logits.dtype)
 
-        # Hybrid focal + dice variant (YOLOPv2 paper §3 ablation).
-        # LOSS.LL_DICE_GAIN > 0 turns it on. Dice operates on the
-        # sigmoided foreground-channel probabilities.
+        # Paper-aligned 2-class lane segmentation: background + lane.
+        # Keep the 1-channel route only as a backward-compatibility fallback.
+        if lane_logits.shape[1] == 2:
+            lseg_ll = LaneSegLoss(lane_logits, lane_targets)
+            lane_prob = torch.softmax(lane_logits, dim=1)
+            lane_fg_prob = lane_prob[:, 1:2]
+            lane_fg_tgt = lane_targets[:, 1:2]
+        else:
+            lane_fg_tgt = lane_targets[:, 1:2]
+            lane_logits_for_loss = lane_logits if lane_logits.shape[1] == 1 else lane_logits[:, 1:2]
+            lseg_ll = LaneSegLoss(lane_logits_for_loss, lane_fg_tgt)
+            lane_fg_prob = torch.sigmoid(lane_logits_for_loss)
+
         ldice_ll = torch.zeros(1, device=device)
         dice_gain = float(getattr(cfg.LOSS, 'LL_DICE_GAIN', 0.0) or 0.0)
         if dice_gain > 0:
-            # predictions[1]: [B, 2, H, W] logits. We take channel 1 (fg)
-            # as the lane-presence logit and sigmoid it to [0,1].
-            fg_prob = torch.sigmoid(predictions[1][:, 1])              # [B, H, W]
-            fg_tgt = targets[1][:, 1].to(fg_prob.dtype)                # [B, H, W]
-            inter = (fg_prob * fg_tgt).sum(dim=(1, 2))
-            denom = fg_prob.sum(dim=(1, 2)) + fg_tgt.sum(dim=(1, 2))
-            dice = (2.0 * inter + 1.0) / (denom + 1.0)
-            ldice_ll = (1.0 - dice).mean().unsqueeze(0)
+            if lane_logits.shape[1] == 2:
+                inter = (lane_prob * lane_targets).sum(dim=(2, 3))
+                denom = lane_prob.sum(dim=(2, 3)) + lane_targets.sum(dim=(2, 3))
+                dice = (2.0 * inter + 1.0) / (denom + 1.0)
+                ldice_ll = (1.0 - dice.mean(dim=1)).mean().unsqueeze(0)
+            else:
+                inter = (lane_fg_prob * lane_fg_tgt).sum(dim=(1, 2, 3))
+                denom = lane_fg_prob.sum(dim=(1, 2, 3)) + lane_fg_tgt.sum(dim=(1, 2, 3))
+                dice = (2.0 * inter + 1.0) / (denom + 1.0)
+                ldice_ll = (1.0 - dice).mean().unsqueeze(0)
 
-        # Lane line IoU loss — DIFFERENTIABLE soft-IoU on sigmoid probabilities.
-        #
-        # REPAIR (v5): YOLOP upstream (and the previous version of this file)
-        # computed IoU via `torch.max(...)` argmax + `SegmentationMetric(...)
-        # .cpu()`, which is fundamentally non-differentiable — argmax has no
-        # gradient and `.cpu()` severs the graph. That meant this term
-        # contributed ZERO gradient signal to the lane decoder. We replace it
-        # with a soft-IoU computed on `sigmoid(fg_logits)` against the fg
-        # target channel. Padding rows/cols (outside the letterboxed content)
-        # are cropped out before the reduction so padding does not bias the
-        # denominator.
         nb, _, height, width = targets[1].shape
         pad_w, pad_h = shapes[0][1][1]
         pad_w = int(pad_w)
         pad_h = int(pad_h)
-        fg_logits = predictions[1][:, 1]                              # [B, H, W]
-        fg_prob = torch.sigmoid(fg_logits)
-        fg_tgt = targets[1][:, 1].to(fg_prob.dtype)
+        fg_prob = lane_fg_prob[:, 0]
+        fg_tgt = lane_fg_tgt[:, 0]
         if pad_h > 0 or pad_w > 0:
             fg_prob = fg_prob[:, pad_h:height - pad_h, pad_w:width - pad_w]
             fg_tgt = fg_tgt[:, pad_h:height - pad_h, pad_w:width - pad_w]
@@ -180,19 +174,52 @@ def get_loss(cfg, device):
     """
     BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.CLS_POS_WEIGHT])).to(device)
     BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.OBJ_POS_WEIGHT])).to(device)
-    BCEseg = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([cfg.LOSS.SEG_POS_WEIGHT])).to(device)
 
     gamma = float(getattr(cfg.LOSS, 'FL_GAMMA', 0.0) or 0.0)
     if gamma > 0:
         BCEcls, BCEobj = FocalLoss(BCEcls, gamma), FocalLoss(BCEobj, gamma)
 
     ll_gamma = float(getattr(cfg.LOSS, 'LL_FL_GAMMA', 0.0) or 0.0)
-    if ll_gamma > 0:
-        BCEseg = FocalLoss(BCEseg, ll_gamma)
+    LaneSeg = LaneSegCriterion(pos_weight=float(cfg.LOSS.SEG_POS_WEIGHT), gamma=ll_gamma).to(device)
 
-    loss_list = [BCEcls, BCEobj, BCEseg]
+    loss_list = [BCEcls, BCEobj, LaneSeg]
     loss = MultiHeadLoss(loss_list, cfg=cfg, lambdas=cfg.LOSS.MULTI_HEAD_LAMBDA)
     return loss
+
+
+class LaneSegCriterion(nn.Module):
+    """Lane segmentation loss router.
+
+    - 2-channel logits + 2-channel one-hot targets  -> softmax focal / CE
+    - 1-channel logits + fg target                  -> BCE / focal-BCE
+
+    This lets the repaired training code stay backward compatible while
+    making the default YOLOPv2 path faithful to the paper's C=2 lane-loss
+    formula.
+    """
+
+    def __init__(self, pos_weight=1.0, gamma=0.0):
+        super().__init__()
+        self.gamma = float(gamma)
+        self.binary = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([pos_weight]))
+        if self.gamma > 0:
+            self.binary = FocalLoss(self.binary, self.gamma)
+
+    def forward(self, pred, true):
+        if pred.shape[1] == 2 and true.shape[1] == 2:
+            return self._softmax_focal(pred, true)
+        return self.binary(pred, true)
+
+    def _softmax_focal(self, logits, targets):
+        import torch.nn.functional as F
+        log_prob = F.log_softmax(logits, dim=1)
+        prob = log_prob.exp()
+        if self.gamma > 0:
+            loss = -targets * ((1.0 - prob).clamp(min=1e-6) ** self.gamma) * log_prob
+        else:
+            loss = -targets * log_prob
+        loss = loss.sum(dim=1)
+        return loss.mean()
 
 
 def smooth_BCE(eps=0.1):

@@ -97,7 +97,7 @@ TRAIN:
   GAMMA2: 0.0
   BEGIN_EPOCH: 0
   END_EPOCH: 300
-  SGDR: true
+  SGDR: false
   SGDR_T0: 100
   SGDR_TMULT: 1
   VAL_FREQ: 1

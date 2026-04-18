@@ -34,16 +34,13 @@ CUDNN:
 DRIVE:
   ROOT: '/content/drive/MyDrive/EcoCAR'
   # Stage1 artefacts land under stage1/ subtrees so stage2/3 don't collide.
-  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopv2_best_row'
-  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopv2_best_row'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopv2_paper_no_da'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopv2_paper_no_da'
 
 MODEL:
   NAME: 'YOLOPv2'
-  # Stage1 strict YOLOP-style comparison protocol: car+bus+truck+train
-  # merged into one 'vehicle' class. motorcycle / bicycle NOT included.
-  # See lib/dataset/class_maps.py::STAGE1_VEHICLE_MERGED.
-  NC: 1
-  VEHICLE_CLASSES: ['vehicle']
+  NC: 10
+  VEHICLE_CLASSES: ['pedestrian', 'rider', 'car', 'truck', 'bus', 'train', 'motorcycle', 'bicycle', 'traffic light', 'traffic sign']
   PRETRAINED: ''
   IMAGE_SIZE: [640, 640]         # train letterbox target (W, H)
 
@@ -85,7 +82,7 @@ DATASET:
   TEST_SET: 'val'
   DATA_FORMAT: 'jpg'
   ORG_IMG_SIZE: [720, 1280]
-  CLASS_PROTOCOL: 'stage1_vehicle_merged'   # strict YOLOP comparison, 1 class
+  CLASS_PROTOCOL: 'bdd100k_10class'
   # Paper §3 BoF: Mosaic + MixUp in the training path.
   FLIP: true
   SCALE_FACTOR: 0.5
@@ -143,11 +140,6 @@ TRAIN:
   GAMMA2: 0.0
   BEGIN_EPOCH: 0
   END_EPOCH: 300
-  # Scheduler: paper §3 says "cosine annealing with warm restart". We
-  # default to real SGDR (CosineAnnealingWarmRestarts) because that is
-  # the literal reading. T_0 and T_mult are NOT published by the paper
-  # — [INFERRED]. Defaults = 100, 1 → restarts at epochs 100 and 200
-  # across the 300-epoch budget.
   SGDR: false
   SGDR_T0: 100
   SGDR_TMULT: 1

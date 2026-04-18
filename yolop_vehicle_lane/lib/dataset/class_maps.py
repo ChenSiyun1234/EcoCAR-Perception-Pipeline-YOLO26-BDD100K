@@ -43,6 +43,25 @@ STAGE2_3C_EXTENDED: Dict[str, int] = {
 }
 STAGE2_3C_EXTENDED_NAMES: List[str] = ['vehicle', 'motorcycle', 'bicycle']
 
+
+# Strict BDD100K / YOLOP / YOLOPv2 detection taxonomy (10 classes).
+BDD100K_10CLASS: Dict[str, int] = {
+    'pedestrian': 0,
+    'rider': 1,
+    'car': 2,
+    'truck': 3,
+    'bus': 4,
+    'train': 5,
+    'motorcycle': 6, 'motor': 6,
+    'bicycle': 7, 'bike': 7,
+    'traffic light': 8,
+    'traffic sign': 9,
+}
+BDD100K_10CLASS_NAMES: List[str] = [
+    'pedestrian', 'rider', 'car', 'truck', 'bus',
+    'train', 'motorcycle', 'bicycle', 'traffic light', 'traffic sign'
+]
+
 # Legacy 5-class — kept for backward compat with early runs.
 LEGACY_5C_VEHICLE: Dict[str, int] = {
     'car':        0,
@@ -58,6 +77,7 @@ _PROTOCOL_REGISTRY = {
     'stage1_vehicle_merged':    (STAGE1_VEHICLE_MERGED,    STAGE1_VEHICLE_MERGED_NAMES),
     'stage2_1c_vehicle_merged': (STAGE2_1C_VEHICLE_MERGED, STAGE2_1C_VEHICLE_MERGED_NAMES),
     'stage2_3c_extended':       (STAGE2_3C_EXTENDED,       STAGE2_3C_EXTENDED_NAMES),
+    'bdd100k_10class':          (BDD100K_10CLASS,          BDD100K_10CLASS_NAMES),
     'legacy_5c_vehicle':        (LEGACY_5C_VEHICLE,        LEGACY_5C_VEHICLE_NAMES),
 }
 

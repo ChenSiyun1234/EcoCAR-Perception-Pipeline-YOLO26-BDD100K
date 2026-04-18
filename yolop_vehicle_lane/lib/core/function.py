@@ -202,7 +202,10 @@ def validate(epoch, config, val_loader, val_dataset, model, criterion, output_di
             inf_out, train_out = det_out
 
             # Lane line segment evaluation
-            _, ll_predict = torch.max(ll_seg_out, 1)
+            if ll_seg_out.shape[1] == 1:
+                ll_predict = (torch.sigmoid(ll_seg_out[:, 0]) > 0.5).long()
+            else:
+                _, ll_predict = torch.max(ll_seg_out, 1)
             _, ll_gt = torch.max(target[1], 1)  # target[1] is lane (was target[2] in YOLOP)
             ll_predict = ll_predict[:, pad_h:height-pad_h, pad_w:width-pad_w]
             ll_gt = ll_gt[:, pad_h:height-pad_h, pad_w:width-pad_w]
@@ -236,15 +239,13 @@ def validate(epoch, config, val_loader, val_dataset, model, criterion, output_di
                     for i in range(test_batch_size):
                         # Lane line visualization
                         img_ll = cv2.imread(paths[i])
-                        # REPAIR (v5): take argmax FIRST, then upsample with
-                        # nearest — upsampling the 2-channel logits with
-                        # bilinear then argmax'ing was wrong (mixes classes at
-                        # boundaries). Thin lane supervision also demands
-                        # nearest, never bilinear.
-                        ll_seg_mask = ll_seg_out[i][:, pad_h:height-pad_h, pad_w:width-pad_w].unsqueeze(0)
-                        _, ll_seg_mask = torch.max(ll_seg_mask, 1)
+                        ll_seg_crop = ll_seg_out[i:i+1, :, pad_h:height-pad_h, pad_w:width-pad_w]
+                        if ll_seg_crop.shape[1] == 1:
+                            ll_seg_mask = (torch.sigmoid(ll_seg_crop[:, 0:1]) > 0.5).float()
+                        else:
+                            ll_seg_mask = torch.argmax(ll_seg_crop, dim=1, keepdim=True).float()
                         ll_seg_mask = torch.nn.functional.interpolate(
-                            ll_seg_mask.unsqueeze(1).float(),
+                            ll_seg_mask,
                             scale_factor=float(1.0 / max(ratio, 1e-6)),
                             mode='nearest',
                         ).squeeze(1).long()

@@ -22,15 +22,14 @@ Deltas from YOLOP MCnet_0 (with layer-number preservation where possible):
      `nc` changed 1→5 for the vehicle-only BDD class set.
   4. Lane seg decoder (layers 25-30): YOLOP's `Upsample+Conv` stages
      replaced with `ConvTranspose2d` (deconvolution) stages per paper.
-     Taps from layer 16 (post-FPN encoder output, stride 8), same as
-     YOLOP's lane branch.
+     Tap moved to layer 17 — the refined end-of-FPN P3 feature — which
+     is the actual end of the FPN path in this YOLOP-derived neck and is
+     therefore the closest faithful reading of the paper text.
   5. Drivable-area decoder: removed entirely.
-  6. Output contract: the lane head emits 2-channel logits at full
-     input resolution so the existing `MultiHeadLoss` and `validate()`
-     code (which compares against a 2-channel bg/fg target at full
-     res) works unmodified. The YOLOPv2 demo contract (1-ch sigmoid
-     at H/2×W/2) is matched at deployment time by `softmax(.)[..., 1]`
-     downsampled ×2 — see `REPAIR_SUMMARY.md`. Marked [INFERRED].
+  6. Output contract: the lane head emits a 2-channel bg/fg logit map at
+     full input resolution. This matches the paper's lane-loss formula,
+     which is written for C=2 segmentation categories (background and
+     lane), more faithfully than the earlier 1-channel surrogate.
 """
 
 import math
@@ -86,15 +85,14 @@ YOLOPv2Cfg = [
         [128, 256, 512]]],                          # 24  Detect (nc=5)
 
     # ── Lane seg decoder 25-30 — deconvolution stages ──────────────
-    # YOLOP MCnet_0 lane branch used Upsample+Conv (lines 99-108).
-    # YOLOPv2 paper §3 specifies deconvolution; we use ConvTranspose2d.
-    # Taps from layer 16 (same as YOLOP), channels 256 after Concat.
-    [16,  nn.ConvTranspose2d, [256, 128, 2, 2]],   # 25  stride 4
-    [-1,  Conv,               [128, 64, 3, 1]],    # 26
-    [-1,  nn.ConvTranspose2d, [64, 32, 2, 2]],     # 27  stride 2
-    [-1,  Conv,               [32, 16, 3, 1]],     # 28
-    [-1,  nn.ConvTranspose2d, [16, 8, 2, 2]],      # 29  stride 1 (full resolution)
-    [-1,  Conv,               [8, 2, 3, 1]],       # 30  2-ch output (bg, fg)
+    # Tap the refined P3 feature after the FPN CSP block (layer 17).
+    # Output is a paper-aligned 2-channel bg/fg logit map.
+    [17,  nn.ConvTranspose2d, [128, 64, 2, 2]],    # 25
+    [-1,  Conv,               [64, 32, 3, 1]],     # 26
+    [-1,  nn.ConvTranspose2d, [32, 16, 2, 2]],     # 27
+    [-1,  Conv,               [16, 8, 3, 1]],      # 28
+    [-1,  nn.ConvTranspose2d, [8, 8, 2, 2]],       # 29
+    [-1,  nn.Conv2d,          [8, 2, 1, 1]],       # 30  2-ch lane logits
 ]
 
 
@@ -155,19 +153,16 @@ class MCnetV2(nn.Module):
           * `det_out` is the YOLOP-style detection output (training
             mode: list of 3 raw grid tensors; eval mode: `(infer, train_out)`
             tuple from `Detect.forward`);
-          * `lane_logits` is a **2-channel raw-logits** map at **full
-            input resolution** with channels ordered as (bg, fg).
+          * `lane_logits` is a **2-channel bg/fg raw-logit** map at
+            **full input resolution**.
 
-        This is the single training contract — the loss pipeline
-        (`MultiHeadLoss` + optional focal + optional dice on sigmoided
-        probabilities) consumes these logits directly via
-        `BCEWithLogitsLoss`. argmax over the channel axis still works
-        for visualization because argmax is monotonic-invariant.
+        This is the paper-aligned training contract — the loss pipeline
+        consumes the 2-channel logits directly and applies hybrid focal
+        + dice supervision over the two segmentation categories.
 
-        The YOLOPv2 public demo (`external_repos/YOLOPv2/demo.py`)
-        exports a different contract — 1-channel sigmoid at H/2 × W/2.
-        To match the demo contract at inference / export time, use
-        `predict()` instead of `forward()`.
+        `predict()` converts these logits to the foreground lane
+        probability map expected by downstream visualization / export
+        utilities.
         """
         cache = []
         out = []
@@ -191,12 +186,8 @@ class MCnetV2(nn.Module):
 
         Returns `(det_out, lane_prob_half_res_1ch)`:
           * `det_out` unchanged from `forward()`;
-          * `lane_prob_half_res_1ch` is `sigmoid(fg_logits)` at
-            **half input resolution** (H/2 × W/2), a single channel —
-            byte-compatible with
-            `external_repos/YOLOPv2/utils/utils.py::lane_line_mask`
-            which calls `torch.round(sigmoid(ll)).squeeze(1)` on the
-            same tensor shape.
+          * `lane_prob_half_res_1ch` is `sigmoid(lane_logit)` at
+            **half input resolution** (H/2 × W/2), a single channel.
 
         Downstream consumers:
           * notebook 06 (export) — use this for ONNX / TorchScript.
@@ -206,8 +197,7 @@ class MCnetV2(nn.Module):
         """
         out = self.forward(x)
         det_out, lane_logits = out       # lane_logits: [B, 2, H, W]
-        fg_logits = lane_logits[:, 1:2]   # keep the fg channel only
-        fg_prob = torch.sigmoid(fg_logits)
+        fg_prob = torch.softmax(lane_logits, dim=1)[:, 1:2]
         # Downsample to H/2 × W/2 to match the demo contract.
         lane_prob_half = torch.nn.functional.interpolate(
             fg_prob, scale_factor=0.5, mode='bilinear', align_corners=False)
