@@ -92,8 +92,12 @@ def train(cfg, train_loader, model, criterion, optimizer, scaler, epoch, num_bat
             outputs = model(input)
             total_loss, head_losses = criterion(outputs, target, shapes, model)
 
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         scaler.scale(total_loss).backward()
+        grad_clip = float(getattr(cfg.TRAIN, 'GRAD_CLIP_NORM', 0.0) or 0.0)
+        if grad_clip > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         scaler.step(optimizer)
         scaler.update()
 

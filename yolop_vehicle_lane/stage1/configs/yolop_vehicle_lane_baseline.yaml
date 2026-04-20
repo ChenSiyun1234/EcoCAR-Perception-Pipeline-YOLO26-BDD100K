@@ -83,6 +83,7 @@ TRAIN:
   LANE_ONLY: false
   ENC_DET_ONLY: false
   PLOT: true
+  GRAD_CLIP_NORM: 10.0
 
 TEST:
   BATCH_SIZE_PER_GPU: 24
