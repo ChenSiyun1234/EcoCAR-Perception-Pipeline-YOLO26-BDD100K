@@ -288,6 +288,17 @@ class AutoDriveDataset(Dataset):
                 (img, lane_label), ratio, pad = letterbox(
                     (img, lane_label), explicit_shape,
                     auto=False, scaleup=self.is_train)
+            elif bool(getattr(self.cfg.DATASET, 'MOSAIC', False)):
+                # When MOSAIC is enabled, the mosaic branch produces a
+                # square s×s tile. With MOSAIC_PROB<1.0 some samples in
+                # the same batch fall through to this non-mosaic branch;
+                # auto=True would stride-round BDD 1280×720 to 384×640
+                # and collate_fn's torch.stack would then fail on mixed
+                # shapes. Force a square (s, s) letterbox so both
+                # branches produce identical tensor shapes.
+                (img, lane_label), ratio, pad = letterbox(
+                    (img, lane_label), (resized_shape, resized_shape),
+                    auto=False, scaleup=self.is_train)
             else:
                 (img, lane_label), ratio, pad = letterbox(
                     (img, lane_label), resized_shape,

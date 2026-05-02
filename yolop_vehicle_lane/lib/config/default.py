@@ -31,7 +31,7 @@ _C.DRIVE.METRICS_DIR = '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/metrics
 
 # common params for NETWORK
 _C.MODEL = CN(new_allowed=True)
-# MODEL.NAME selects the baseline: 'YOLOP' or 'YOLOPv2'. See lib/models/__init__.py.
+# MODEL.NAME selects the baseline: 'YOLOP', 'YOLOPv2', or 'YOLOPX'. See lib/models/__init__.py.
 _C.MODEL.NAME = 'YOLOPv2'
 _C.MODEL.NC = 5  # number of detection classes (vehicle-only)
 _C.MODEL.VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle', 'bicycle']

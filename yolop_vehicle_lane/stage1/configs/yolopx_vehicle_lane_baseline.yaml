@@ -1,0 +1,106 @@
+# Phase-1 YOLOPX baseline adapted for vehicle detection + lane segmentation.
+# Drivable-area segmentation is intentionally removed.
+# Detection uses the YOLOPX / YOLOX anchor-free head.
+# Lane segmentation uses YOLOPX's C2-assisted high-resolution lane branch.
+
+GPUS: (0,)
+WORKERS: 8
+PIN_MEMORY: true
+PRINT_FREQ: 20
+AUTO_RESUME: false
+NEED_AUTOANCHOR: false
+DEBUG: false
+
+CUDNN:
+  BENCHMARK: true
+  DETERMINISTIC: false
+  ENABLED: true
+
+DRIVE:
+  ROOT: '/content/drive/MyDrive/EcoCAR'
+  CHECKPOINT_DIR: '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/checkpoints/yolopx'
+  METRICS_DIR:    '/content/drive/MyDrive/EcoCAR/yolop_vehicle_lane/stage1/metrics/yolopx'
+
+MODEL:
+  NAME: 'YOLOPX'
+  NC: 1
+  VEHICLE_CLASSES: ['vehicle']
+  PRETRAINED: ''
+  IMAGE_SIZE: [640, 640]
+
+LOSS:
+  BOX_GAIN: 0.05
+  CLS_GAIN: 0.5
+  OBJ_GAIN: 1.0
+  CLS_POS_WEIGHT: 1.0
+  OBJ_POS_WEIGHT: 1.0
+  SEG_POS_WEIGHT: 1.0
+  LL_SEG_GAIN: 0.2
+  LL_IOU_GAIN: 0.2
+  FL_GAMMA: 2.0
+  LL_FL_GAMMA: 2.0
+  LL_DICE_GAIN: 0.0
+  YOLOPX_REG_WEIGHT: 5.0
+  YOLOPX_OBJ_FL_GAMMA: 2.0
+  MULTI_HEAD_LAMBDA: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+DATASET:
+  DATASET: 'BddDataset'
+  TRAIN_SET: 'train'
+  TEST_SET: 'val'
+  DATA_FORMAT: 'jpg'
+  ORG_IMG_SIZE: [720, 1280]
+  CLASS_PROTOCOL: 'stage1_vehicle_merged'
+  FLIP: true
+  SCALE_FACTOR: 0.25
+  ROT_FACTOR: 10
+  TRANSLATE: 0.1
+  SHEAR: 0.0
+  COLOR_RGB: false
+  HSV_H: 0.015
+  HSV_S: 0.7
+  HSV_V: 0.4
+  MOSAIC: false
+  MOSAIC_PROB: 0.5
+  MIXUP: true
+  MIXUP_PROB: 0.05
+  LANE_TRAIN_THICKNESS: 8
+  LANE_TEST_THICKNESS: 2
+
+TRAIN:
+  OPTIMIZER: 'adamw'
+  LR0: 0.001
+  LRF: 0.1
+  MOMENTUM: 0.937
+  WD: 0.0005
+  NESTEROV: true
+  WARMUP_EPOCHS: 5.0
+  WARMUP_BIASE_LR: 0.1
+  WARMUP_MOMENTUM: 0.8
+  GAMMA1: 0.99
+  GAMMA2: 0.0
+  BEGIN_EPOCH: 0
+  END_EPOCH: 200
+  SGDR: false
+  SGDR_T0: 100
+  SGDR_TMULT: 1
+  VAL_FREQ: 1
+  BATCH_SIZE_PER_GPU: 32
+  SHUFFLE: true
+  IOU_THRESHOLD: 0.2
+  ANCHOR_THRESHOLD: 4.0
+  DET_ONLY: false
+  LANE_ONLY: false
+  ENC_DET_ONLY: false
+  PLOT: false
+  GRAD_CLIP_NORM: 0.0
+
+TEST:
+  BATCH_SIZE_PER_GPU: 32
+  MODEL_FILE: ''
+  SAVE_JSON: false
+  SAVE_TXT: false
+  PLOTS: false
+  NMS_CONF_THRESHOLD: 0.001
+  NMS_IOU_THRESHOLD: 0.6
+  IMAGE_SIZE: [640, 384]

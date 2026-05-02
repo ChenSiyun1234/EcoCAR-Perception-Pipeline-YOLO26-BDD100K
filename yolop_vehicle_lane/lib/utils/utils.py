@@ -91,6 +91,12 @@ def get_optimizer(cfg, model):
             lr=cfg.TRAIN.LR0,
             betas=(cfg.TRAIN.MOMENTUM, 0.999)
         )
+    elif cfg.TRAIN.OPTIMIZER == 'adamw':
+        optimizer = optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=cfg.TRAIN.LR0,
+            betas=(cfg.TRAIN.MOMENTUM, 0.999)
+        )
     return optimizer
 
 
